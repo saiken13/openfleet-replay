@@ -120,3 +120,23 @@ Don't edit old decisions to change them. Add a new entry that supersedes the old
 **Alternatives considered:** Native `CREATE TYPE … AS ENUM`; lookup tables with FKs (heavier, and no benefit for fixed, code-owned value sets).
 **Tradeoffs:** Changing an enum in Python needs a matching migration to update the CHECK constraint. `alembic check` in CI doesn't compare CHECK bodies, so a reviewer has to catch a forgotten one.
 **Date:** 2026-11-05
+
+## 016 — At most one RUNNING run per robot; a newer run start aborts older RUNNING runs
+**Status:** Accepted (2026-11-05)
+**Decision:** A robot's **latest-started run** (by `started_at`, then `id`) is the only run that may be RUNNING.
+- When a run starts, every other RUNNING run for that robot becomes ABORTED, with `ended_at` set to the latest run's `started_at`.
+- `robots.current_run_id` points at the latest run if it's RUNNING, and is NULL otherwise.
+- `robots.software_version` is updated only when the new run is the latest one.
+- Run starts and run ends both lock the robot row first, then run rows. That serializes them per robot and keeps the lock order consistent, so they can't deadlock.
+**Why:**
+- A robot that starts a new run has evidently stopped the old one: it crashed, rebooted, or lost the "end" request. Leaving the old run RUNNING would make liveness, dashboards, and incident attribution ambiguous.
+- Ordering by `started_at` instead of arrival order handles runs that were recorded offline and synced late (DECISIONS #013). Those runs never become "current" and never roll the robot's software version back.
+**Alternatives considered:**
+- Allow several concurrent runs per robot. That's ambiguous about which run telemetry belongs to.
+- Reject a new start while a run is RUNNING. A crashed robot couldn't recover without an operator.
+- Let the sweeper alone abort stale runs. Slower, and the robot is already telling us.
+**Tradeoffs:**
+- A late "end" for an auto-aborted run returns 409 unless its status is ABORTED. The run's real outcome (SUCCESS or FAILED) is lost in that case.
+- `ended_at` of an auto-aborted run is an upper bound, not the true end.
+- The sweeper (`RUN_ABANDON_AFTER_S`) is still needed for robots that go silent without starting a new run.
+**Date:** 2026-11-05

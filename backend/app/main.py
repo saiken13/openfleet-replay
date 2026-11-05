@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
+from app.api.errors import register_error_handlers
 from app.api.v1.router import api_router
 from app.core.config import Settings, get_settings
 from app.db.engine import build_engine
@@ -26,6 +27,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app = FastAPI(title="OpenFleet Replay", version="0.1.0", lifespan=lifespan)
     app.include_router(api_router)
+    register_error_handlers(app)
     return app
 
 

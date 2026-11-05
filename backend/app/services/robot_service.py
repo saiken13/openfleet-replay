@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import Robot
+from app.domain.errors import NotFoundError
 from app.repositories.robot_repository import RobotRepository
 
 
@@ -33,5 +34,8 @@ class RobotService:
         await self.session.commit()
         return RegistrationResult(robot=robot, created=created)
 
-    async def get(self, robot_id: str) -> Robot | None:
-        return await self.robots.get(robot_id)
+    async def get(self, robot_id: str) -> Robot:
+        robot = await self.robots.get(robot_id)
+        if robot is None:
+            raise NotFoundError(f"robot {robot_id!r} not found")
+        return robot

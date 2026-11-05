@@ -32,6 +32,37 @@ GET /api/v1/robots/{robot_id} → RobotService.get() → 200 | 404
 
 A racing first registration blocks on the other's uncommitted insert, then falls through to the update (`tests/test_robot_registration_concurrency.py`).
 
+## 0c. Run lifecycle (implemented)
+
+```
+Start (client-generated UUID, retry-safe)
+→ PUT /api/v1/runs/{run_id}                        body: RunStart {robot_id, software_version?, started_at (tz-aware)}
+→ backend/app/api/v1/runs.py :: start_run()
+→ backend/app/services/run_service.py :: RunService.start()
+    ├─ RobotRepository.get(for_update)               lock robot row → serializes run starts per robot; 404 if unknown
+    ├─ RunRepository.insert_if_absent()              INSERT … ON CONFLICT (id) DO NOTHING
+    │    └─ conflict → compare robot_id / version / started_at → 200 (same) | 409 (different)
+    ├─ _reconcile_current_run()                      DECISIONS #016
+    │    ├─ RunRepository.latest_for_robot()         ORDER BY started_at DESC, id DESC
+    │    ├─ RunRepository.abort_running_except()     older RUNNING runs → ABORTED, ended_at = latest.started_at
+    │    └─ RobotRepository.set_current_run()        current_run_id (+ software_version) or NULL
+    └─ COMMIT → 201 (run may already be ABORTED if it was a late-synced older run)
+
+End
+→ POST /api/v1/runs/{run_id}/end                   body: RunEnd {status: SUCCESS|FAILED|ABORTED, ended_at}
+→ RunService.end()
+    ├─ lock robot row, then run row                  same order as start() → no deadlock (tests/test_concurrency.py)
+    ├─ already terminal: same status → 200 (no change) | different → 409
+    ├─ ended_at < started_at → 422
+    └─ set status/ended_at; clear robots.current_run_id if it pointed here → COMMIT → 200
+
+Read
+→ GET /api/v1/runs/{run_id}                         200 | 404
+→ GET /api/v1/robots/{robot_id}/runs?limit=&cursor= newest first; keyset on (started_at, id); opaque cursor
+```
+
+Errors: services raise `app/domain/errors.py` exceptions. `app/api/errors.py` maps them in one place (NotFound → 404, Conflict → 409, InvalidRequest → 422) to `{"detail": "..."}`.
+
 ## 1. Telemetry ingest (planned — Phase 6–9)
 
 ```

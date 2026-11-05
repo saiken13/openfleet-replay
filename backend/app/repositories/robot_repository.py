@@ -1,3 +1,5 @@
+import uuid
+
 from sqlalchemy import func, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -11,8 +13,22 @@ class RobotRepository:
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
 
-    async def get(self, robot_id: str) -> Robot | None:
-        return await self.session.get(Robot, robot_id, populate_existing=True)
+    async def get(self, robot_id: str, *, for_update: bool = False) -> Robot | None:
+        return await self.session.get(
+            Robot, robot_id, populate_existing=True, with_for_update=for_update
+        )
+
+    async def set_current_run(
+        self,
+        robot_id: str,
+        run_id: uuid.UUID | None,
+        software_version: str | None = None,
+    ) -> None:
+        """Point the robot at its current run; also record its version when one is given."""
+        values: dict[str, object] = {"current_run_id": run_id, "updated_at": func.now()}
+        if software_version is not None:
+            values["software_version"] = software_version
+        await self.session.execute(update(Robot).where(Robot.id == robot_id).values(**values))
 
     async def insert_identity_if_absent(
         self, robot_id: str, name: str, model: str | None

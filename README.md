@@ -2,7 +2,7 @@
 
 **Observability, incident debugging, and replay for ROS 2 robot fleets.**
 
-> ⚠️ **Status: early development (Phase 1).** The backend runs with a health check, the robots/runs schema, and robot registration (`PUT /api/v1/robots/{id}`). Features below are the MVP target. See [HANDOFF.md](HANDOFF.md) for current progress.
+> ⚠️ **Status: early development (Phase 1).** The backend runs with a health check, the robots/runs schema, and robot registration, and the run lifecycle (start, end, list). Features below are the MVP target. See [HANDOFF.md](HANDOFF.md) for current progress.
 
 When a robot fails in production, engineers need to answer: *What happened? Which node or topic failed first? What changed in the seconds before? Which software version was running? Does the next version fix it or break something else?*
 
