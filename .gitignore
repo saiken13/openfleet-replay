@@ -224,3 +224,4 @@ __marimo__/
 .env
 node_modules/
 .vite/
+!frontend/src/lib/
