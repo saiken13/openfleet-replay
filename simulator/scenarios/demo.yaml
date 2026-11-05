@@ -1,0 +1,56 @@
+name: demo
+description: >
+  Four robots. amr-02's LiDAR degrades (15 -> 4 Hz), then stops entirely and its driver
+  crashes; amr-03 spikes CPU; amr-04 drops off the network mid-run and comes back.
+  amr-01 stays healthy as the control.
+seed: 42
+duration_s: 180
+tick_s: 1.0
+software_version: "1.4.0"
+fleet:
+  count: 4
+  id_prefix: amr
+  model: AMR-Sim
+topics:
+  /scan: 15
+  /odom: 50
+  /camera/image_raw: 30
+  /cmd_vel: 10
+nodes: [lidar_driver, nav2_controller, localization, camera_driver]
+failures:
+  - kind: topic_rate          # degraded LiDAR
+    robots: [1]
+    topic: /scan
+    hz: 4
+    at_s: 30
+    duration_s: 30
+    log: "LaserScan rate dropping: USB bandwidth contention"
+    log_level: WARN
+  - kind: topic_rate          # ... then it stops (escalates the same incident)
+    robots: [1]
+    topic: /scan
+    hz: 0
+    at_s: 60
+    duration_s: 30
+  - kind: node_state
+    robots: [1]
+    node: lidar_driver
+    state: ERROR
+    at_s: 62
+    duration_s: 28
+    log: "lidar_driver: device /dev/ttyUSB0 disconnected"
+  - kind: cpu
+    robots: [2]
+    pct: 97
+    at_s: 45
+    duration_s: 40
+    log: "nav2_controller: costmap update taking 180ms"
+    log_level: WARN
+  - kind: offline
+    robots: [3]
+    at_s: 100
+    duration_s: 30
+  - kind: battery_drain
+    robots: [3]
+    pct_per_s: 0.3
+    at_s: 20

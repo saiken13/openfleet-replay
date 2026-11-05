@@ -1,0 +1,21 @@
+name: lidar_regression
+description: >
+  The same robot on software 1.1.0, where a driver change halves the LiDAR rate. `openfleet
+  check` against examples/regression.yaml should FAIL this run.
+seed: 7
+duration_s: 60
+software_version: "1.1.0"
+fleet:
+  count: 1
+  id_prefix: ci
+topics:
+  /scan: 15
+  /odom: 50
+nodes: [lidar_driver, nav2_controller]
+failures:
+  - kind: topic_rate
+    topic: /scan
+    hz: 7
+    at_s: 5
+    log: "lidar_driver: falling back to compatibility mode"
+    log_level: WARN

@@ -1,0 +1,12 @@
+name: healthy
+description: Baseline run with no failures (use as the "base" for compare / --baseline).
+seed: 7
+duration_s: 60
+software_version: "1.0.0"
+fleet:
+  count: 1
+  id_prefix: ci
+topics:
+  /scan: 15
+  /odom: 50
+nodes: [lidar_driver, nav2_controller]

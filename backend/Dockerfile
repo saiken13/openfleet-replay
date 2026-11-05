@@ -12,6 +12,7 @@ COPY pyproject.toml ./
 RUN mkdir app && touch app/__init__.py && pip install ".[dev]"
 
 COPY . .
+RUN pip install --no-deps .
 
 EXPOSE 8000
 CMD ["sh", "-c", "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"]

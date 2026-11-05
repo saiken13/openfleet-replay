@@ -19,10 +19,27 @@ services:
     build: ./backend
     environment:
       OPENFLEET_DATABASE_URL: postgresql+asyncpg://openfleet:openfleet@postgres:5432/openfleet
+      OPENFLEET_CORS_ORIGINS: '["http://localhost:5173", "http://localhost:8080"]'
     ports:
       - "8000:8000"
     depends_on:
       postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/health', timeout=2)"]
+      interval: 3s
+      timeout: 3s
+      retries: 40
+
+  # Simulated fleet running the demo scenario in a loop. Opt in:  docker compose --profile demo up
+  simulator:
+    build: ./simulator
+    profiles: [demo]
+    environment:
+      OPENFLEET_API: http://backend:8000
+    command: ["openfleet-sim", "--scenario", "scenarios/demo.yaml", "--loop"]
+    depends_on:
+      backend:
         condition: service_healthy
 
 volumes:

@@ -1,0 +1,27 @@
+# Regression thresholds for `openfleet check RUN_ID --config examples/regression.yaml`.
+# Every key is optional. Exit code 1 if any check fails.
+run:
+  allowed_status: [SUCCESS, RUNNING]
+  min_samples: 30
+
+topics:
+  /scan:
+    min_avg_hz: 10        # LiDAR must average >= 10 Hz over the run
+    min_p05_hz: 5         # ...and stay >= 5 Hz 95% of the time
+    max_failed_pct: 0     # never fully stop
+  /odom:
+    min_avg_hz: 40
+
+metrics:
+  max_avg_cpu_pct: 80
+  max_peak_mem_pct: 90
+  min_battery_pct: 15
+
+incidents:
+  max_critical: 0
+  max_warning: 2
+
+# Only used with --baseline OTHER_RUN_ID
+baseline:
+  max_topic_avg_hz_drop_pct: 10
+  max_new_critical: 0

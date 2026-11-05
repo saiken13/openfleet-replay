@@ -37,3 +37,48 @@ jobs:
       - run: alembic upgrade head
       - run: alembic check  # ORM models and migrations must agree
       - run: pytest -v
+
+  simulator:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: simulator
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: simulator/pyproject.toml
+      - run: pip install -e ".[dev]"
+      - run: ruff check .
+      - run: ruff format --check .
+      - run: pytest -v
+
+  # The product's own story, as a gate: a healthy run must pass the regression config,
+  # and the scripted LiDAR regression must FAIL it (exit code 1).
+  e2e-regression-check:
+    runs-on: ubuntu-latest
+    needs: [backend, simulator]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: docker compose up -d --build --wait postgres backend
+      - run: pip install -e backend -e simulator
+      - name: Healthy baseline run
+        run: openfleet-sim -s simulator/scenarios/healthy.yaml --fast -o base.json
+      - name: Regression candidate run
+        run: openfleet-sim -s simulator/scenarios/lidar_regression.yaml --fast -o cand.json
+      - name: Baseline passes the regression config
+        run: openfleet check "$(jq -r '.[0].run_id' base.json)" -c examples/regression.yaml
+      - name: Regression is caught (expects exit code 1)
+        run: |
+          set +e
+          openfleet check "$(jq -r '.[0].run_id' cand.json)" -c examples/regression.yaml \
+            --baseline "$(jq -r '.[0].run_id' base.json)"
+          code=$?
+          test "$code" -eq 1 || { echo "expected exit 1, got $code"; exit 1; }
+      - if: failure()
+        run: docker compose logs backend
