@@ -1,6 +1,6 @@
 # Architecture
 
-> **Status: Accepted, implementation in progress.** Only the backend skeleton exists (app factory, settings, health check, Alembic). Every section below describes the *intended* design unless it says otherwise.
+> **Status: Accepted, implementation in progress.** Implemented so far: backend skeleton (app factory, settings, health check, Alembic), the `robots` and `runs` tables (migration `0001`), and robot registration. Every section below describes the *intended* design unless it says otherwise.
 > When a phase is implemented, update the matching section and remove its "(planned)" marker.
 > Rule: if the code and this document disagree, one of them is a bug.
 
@@ -72,6 +72,8 @@ Design principle: **separate kinds of data by how they're written and read**, ra
 | Lifecycle entities | `runs`, `incidents` | Create + status transitions | Lists, detail pages |
 
 ### Tables
+
+`robots` and `runs` are implemented (`backend/app/db/models.py`, migration `0001`). Status columns are TEXT + CHECK (DECISIONS #015). The others are still planned.
 
 **robots**: identity and current state live in one row, but different code paths write them.
 - Identity: `id TEXT PK` (robot-chosen, immutable, e.g. `robot-01`), `name`, `model`, `created_at`

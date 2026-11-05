@@ -7,6 +7,7 @@ from fastapi import FastAPI
 from app.api.v1.router import api_router
 from app.core.config import Settings, get_settings
 from app.db.engine import build_engine
+from app.db.session import build_sessionmaker
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -17,6 +18,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.settings = settings
         app.state.engine = build_engine(settings)
+        app.state.sessionmaker = build_sessionmaker(app.state.engine)
         try:
             yield
         finally:

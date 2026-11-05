@@ -2,7 +2,7 @@
 
 **Observability, incident debugging, and replay for ROS 2 robot fleets.**
 
-> ⚠️ **Status: early development (Phase 1).** The backend skeleton runs (health check + Postgres + migrations). Features below are the MVP target. See [HANDOFF.md](HANDOFF.md) for current progress.
+> ⚠️ **Status: early development (Phase 1).** The backend runs with a health check, the robots/runs schema, and robot registration (`PUT /api/v1/robots/{id}`). Features below are the MVP target. See [HANDOFF.md](HANDOFF.md) for current progress.
 
 When a robot fails in production, engineers need to answer: *What happened? Which node or topic failed first? What changed in the seconds before? Which software version was running? Does the next version fix it or break something else?*
 
@@ -53,7 +53,7 @@ docker compose up -d postgres
 cd backend
 python3.12 -m venv .venv && .venv/bin/pip install -e ".[dev]"
 .venv/bin/alembic upgrade head
-.venv/bin/pytest            # tests run against the real Postgres (DECISIONS #012)
+.venv/bin/pytest            # real Postgres, in a separate `openfleet_test` DB (created automatically)
 .venv/bin/uvicorn app.main:app --reload
 ```
 

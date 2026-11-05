@@ -112,3 +112,11 @@ Don't edit old decisions to change them. Add a new entry that supersedes the old
 **Alternatives considered:** `requirements.txt` (no entry points or metadata); MIT (simpler, but no patent grant).
 **Tradeoffs:** No lockfile yet, so dependency versions are lower-bounded but not pinned. We'll add a lockfile (pip-tools or uv) if CI becomes flaky because of upstream releases.
 **Date:** 2026-11-05
+
+## 015 — Status columns are TEXT + CHECK constraints, not native PostgreSQL enums
+**Status:** Accepted (2026-11-05)
+**Decision:** Columns such as `robots.status` and `runs.status` are `TEXT` with a named `CHECK (status IN (...))`. The allowed values come from Python `StrEnum`s in `app/domain/enums.py` through `app/db/base.py :: enum_check()`.
+**Why:** Native PG enums are awkward to evolve. You can't remove a value, adding one used to be impossible inside a transaction, and Alembic autogenerate handles them poorly. A CHECK constraint is dropped and re-created in one ordinary migration. The storage and index cost is negligible at our scale.
+**Alternatives considered:** Native `CREATE TYPE … AS ENUM`; lookup tables with FKs (heavier, and no benefit for fixed, code-owned value sets).
+**Tradeoffs:** Changing an enum in Python needs a matching migration to update the CHECK constraint. `alembic check` in CI doesn't compare CHECK bodies, so a reviewer has to catch a forgotten one.
+**Date:** 2026-11-05

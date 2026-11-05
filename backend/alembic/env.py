@@ -7,15 +7,17 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from alembic import context
 from app.core.config import get_settings
+from app.db import models  # noqa: F401  (registers tables on Base.metadata)
+from app.db.base import Base
 
 config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-# No ORM models yet. When app/db/models.py exists, set this to Base.metadata for autogenerate.
-target_metadata = None
+target_metadata = Base.metadata
 
-DATABASE_URL = get_settings().database_url
+# Tests (and tools) can point Alembic at another database via the config's sqlalchemy.url.
+DATABASE_URL = config.get_main_option("sqlalchemy.url") or get_settings().database_url
 
 
 def run_migrations_offline() -> None:

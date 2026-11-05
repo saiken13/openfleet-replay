@@ -15,6 +15,23 @@ GET /api/v1/health
 
 The engine is created in the app lifespan (`backend/app/main.py :: create_app()`) and disposed on shutdown. Tests build a fresh app per test with `create_app(settings)`.
 
+## 0b. Robot registration (implemented)
+
+```
+Robot / collector (on boot, safe to retry)
+→ PUT /api/v1/robots/{robot_id}                    body: RobotRegister {name, model?}; robot_id ^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$
+→ backend/app/api/v1/robots.py :: register_robot()  Pydantic validation (extra fields such as status → 422)
+→ backend/app/services/robot_service.py :: RobotService.register()
+    ├─ RobotRepository.insert_identity_if_absent()   INSERT … ON CONFLICT (id) DO NOTHING RETURNING
+    ├─ if it conflicted → RobotRepository.update_identity()   name, model, updated_at only; state untouched
+    └─ COMMIT
+→ 201 (created) | 200 (updated), body: RobotRead
+
+GET /api/v1/robots/{robot_id} → RobotService.get() → 200 | 404
+```
+
+A racing first registration blocks on the other's uncommitted insert, then falls through to the update (`tests/test_robot_registration_concurrency.py`).
+
 ## 1. Telemetry ingest (planned — Phase 6–9)
 
 ```
