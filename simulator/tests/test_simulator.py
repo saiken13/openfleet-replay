@@ -1,5 +1,5 @@
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import httpx
@@ -15,6 +15,10 @@ SCENARIOS = Path(__file__).resolve().parents[1] / "scenarios"
 T0 = datetime(2026, 11, 5, 12, 0, tzinfo=UTC)
 
 
+def at(t: float) -> datetime:
+    return T0 + timedelta(seconds=t)
+
+
 @pytest.mark.parametrize("path", sorted(SCENARIOS.glob("*.yaml")), ids=lambda p: p.name)
 def test_bundled_scenarios_are_valid(path: Path) -> None:
     assert load_scenario(path).name
@@ -22,8 +26,8 @@ def test_bundled_scenarios_are_valid(path: Path) -> None:
 
 def test_same_seed_same_batches() -> None:
     sc = load_scenario(SCENARIOS / "demo.yaml")
-    a = [SimRobot(1, "amr-02", sc).step(t, T0) for t in range(0, 90)]
-    b = [SimRobot(1, "amr-02", sc).step(t, T0) for t in range(0, 90)]
+    a = [SimRobot(1, "amr-02", sc).step(t, at(t)) for t in range(0, 90)]
+    b = [SimRobot(1, "amr-02", sc).step(t, at(t)) for t in range(0, 90)]
     assert a == b
 
 
@@ -34,7 +38,7 @@ def test_failures_apply_in_their_window_and_only_to_targets() -> None:
     def scan(batch):
         return next(t for t in batch["topics"] if t["topic"] == "/scan")["actual_hz"]
 
-    rates = {t: (scan(target.step(t, T0)), scan(other.step(t, T0))) for t in range(0, 95)}
+    rates = {t: (scan(target.step(t, at(t))), scan(other.step(t, at(t)))) for t in range(0, 95)}
     assert 13 < rates[10][0] < 17  # before: nominal 15 Hz with noise
     assert 3 < rates[40][0] < 5  # degraded window
     assert rates[70][0] == 0  # stopped window
@@ -45,14 +49,14 @@ def test_failures_apply_in_their_window_and_only_to_targets() -> None:
 def test_offline_robot_sends_nothing_and_logs_fire_once() -> None:
     sc = load_scenario(SCENARIOS / "demo.yaml")
     r = SimRobot(3, "amr-04", sc)
-    batches = {t: r.step(t, T0) for t in range(0, 140)}
+    batches = {t: r.step(t, at(t)) for t in range(0, 140)}
     assert batches[99] is not None and batches[100] is None and batches[129] is None
     assert batches[130] is not None
     seqs = [b["seq"] for b in batches.values() if b]
     assert seqs == list(range(len(seqs)))  # contiguous: no gaps from the offline window
 
     crash = SimRobot(1, "amr-02", sc)
-    logs = [log for t in range(0, 90) for log in crash.step(t, T0)["logs"]]
+    logs = [log for t in range(0, 90) for log in crash.step(t, at(t))["logs"]]
     assert [lg["message"] for lg in logs] == [
         "LaserScan rate dropping: USB bandwidth contention",
         "lidar_driver: device /dev/ttyUSB0 disconnected",

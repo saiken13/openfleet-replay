@@ -30,6 +30,8 @@ async def test_ingest_stores_batch_and_updates_current_state(client: httpx.Async
     assert [(n["node"], n["state"]) for n in nodes] == [("lidar_driver", "RUNNING")]
     samples = (await client.get("/api/v1/robots/robot-01/telemetry")).json()
     assert [s["seq"] for s in samples] == [0]
+    history = (await client.get("/api/v1/robots/robot-01/topic-history")).json()
+    assert sorted(h["topic"] for h in history) == ["/odom", "/scan"]
 
 
 async def test_ingest_is_idempotent_on_seq(client: httpx.AsyncClient) -> None:
@@ -264,3 +266,37 @@ def _s(seconds: float):
     from datetime import timedelta
 
     return timedelta(seconds=seconds)
+
+
+async def test_ending_a_run_resolves_its_data_incidents_and_stale_state_does_not_refire(
+    client: httpx.AsyncClient, clock: Clock
+) -> None:
+    run_id = await setup_run(client)
+    await ingest(client, run_id, batch(0, hz={"/scan": 4}, cpu=97))
+    assert len(await incidents(client, status="open")) == 2
+
+    await client.post(
+        f"/api/v1/runs/{run_id}/end",
+        json={"status": "FAILED", "ended_at": "2026-11-05T12:01:00Z"},
+    )
+
+    all_ = await incidents(client)
+    assert {i["status"] for i in all_} == {"RESOLVED"}
+    assert (await robot(client))["status"] == "ONLINE"
+    # Idle robot keeps heartbeating: its last (degraded) topic state must not reopen anything.
+    clock.advance(30)
+    await client.post("/api/v1/robots/robot-01/heartbeat", json={})
+    assert await incidents(client, status="open") == []
+
+
+async def test_stale_topic_state_is_ignored_during_a_run(
+    client: httpx.AsyncClient, clock: Clock
+) -> None:
+    run_id = await setup_run(client)
+    await ingest(client, run_id, batch(0, hz={"/camera": 0}))  # reported once, then never again
+    assert len(await incidents(client, status="open")) == 1
+    clock.advance(15)  # > heartbeat timeout: /camera's row is stale
+    await ingest(client, run_id, batch(1))
+    clock.advance(11)
+    await ingest(client, run_id, batch(2))
+    assert await incidents(client, status="open") == []

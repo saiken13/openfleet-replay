@@ -55,6 +55,23 @@ jobs:
       - run: ruff format --check .
       - run: pytest -v
 
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+
   # The product's own story, as a gate: a healthy run must pass the regression config,
   # and the scripted LiDAR regression must FAIL it (exit code 1).
   e2e-regression-check:

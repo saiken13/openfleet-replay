@@ -1,7 +1,6 @@
 # Architecture
 
-> **Status: Accepted, implementation in progress.** Implemented so far: backend skeleton (app factory, settings, health check, Alembic), the `robots` and `runs` tables (migration `0001`), robot registration, and the run lifecycle API. Every section below describes the *intended* design unless it says otherwise.
-> When a phase is implemented, update the matching section and remove its "(planned)" marker.
+> **Status: Implemented (MVP).** Every section describes the code as it is. Where the build refined the original plan, the section says so and links the decision.
 > Rule: if the code and this document disagree, one of them is a bug.
 
 ## 1. System overview
@@ -57,9 +56,9 @@ The backend stores those summaries. It decides whether something is unhealthy an
 | **Replay** (`backend/app/replay/`) | Builds a run's ordered, merged event stream (read-only). Later it will also re-run detection rules over a recorded run. | Hold server-side playback state. Pacing happens in the client. |
 | **PostgreSQL** | Source of truth for identity, current state, time series, events, and incidents. Enforces idempotency and dedup with constraints. | Store large binary recordings. Those go to object storage in Phase 2+. |
 | **Frontend** (`frontend/`) | React + TS + Vite SPA. A single reducer turns events into dashboard state, and both **live** (WS) and **replay** (stream + client clock) feed that same reducer. | Compute health or incident logic itself. |
-| **CLI** (`cli/` or a `backend` entry point, decided in the regression phase) | `openfleet check <run> --config regression.yaml` returns a non-zero exit code when a check fails. A thin HTTP client. | Re-implement detection logic. |
+| **CLI** (`backend/openfleet_cli/`, installed as `openfleet`) | `openfleet check <run> --config regression.yaml` returns a non-zero exit code when a check fails. A thin HTTP client. | Re-implement detection logic. |
 
-## 3. Data model (planned)
+## 3. Data model
 
 Design principle: **separate kinds of data by how they're written and read**, rather than forcing everything into one generic table.
 
@@ -73,7 +72,9 @@ Design principle: **separate kinds of data by how they're written and read**, ra
 
 ### Tables
 
-`robots` and `runs` are implemented (`backend/app/db/models.py`, migration `0001`). Status columns are TEXT + CHECK (DECISIONS #015). The others are still planned.
+Models: `backend/app/db/models.py`. Migrations: `0001` (robots, runs) and `0002` (everything else). Status-like columns are TEXT + CHECK (DECISIONS #015). Two columns were added beyond the original plan:
+- `topic_samples.status`: classified at ingest, so summaries and replay don't re-classify.
+- `incidents.last_detected_at`: drives the auto-resolve hysteresis.
 
 **robots**: identity and current state live in one row, but different code paths write them.
 - Identity: `id TEXT PK` (robot-chosen, immutable, e.g. `robot-01`), `name`, `model`, `created_at`
@@ -124,9 +125,17 @@ Design principle: **separate kinds of data by how they're written and read**, ra
 
 ## 5. Key flows (summary — see [FLOW.md](FLOW.md) for file-level detail)
 
-**Ingest:** `POST /runs/{id}/telemetry` → validate → one transaction: insert samples (`ON CONFLICT DO NOTHING` on seq), upsert current state, emit change-events, bump `last_seen_at` → commit → build snapshot → detection → reconcile incidents → publish to hub.
+**Ingest:** `POST /runs/{id}/telemetry` → validate → **one transaction** (DECISIONS #018), holding the robot row lock:
+1. Insert the sample (`ON CONFLICT DO NOTHING` on seq).
+2. Upsert current state and emit change events.
+3. Bump `last_seen_at`.
+4. Build the snapshot, run detection and reconcile incidents.
+5. Derive the robot's status.
+6. Commit, then publish to the hub.
 
-**Liveness:** the sweeper lists robots whose `last_seen_at < now - heartbeat_timeout_s`, marks them OFFLINE, emits an event, runs detection (HeartbeatMissingRule), and later aborts stale runs.
+**Liveness:** every `SWEEP_INTERVAL_S`, the sweeper:
+- Re-evaluates robots that are not OFFLINE but whose `last_seen_at < now - HEARTBEAT_TIMEOUT_S`. This derives OFFLINE, and HeartbeatMissingRule fires if they were in a run (DECISIONS #019).
+- Aborts the current run of robots silent for longer than `RUN_ABANDON_AFTER_S`.
 
 **Detection:** see §6.
 
@@ -139,10 +148,11 @@ Design principle: **separate kinds of data by how they're written and read**, ra
 ```python
 class DetectionRule(Protocol):
     name: str
-    def evaluate(self, snap: RobotSnapshot, now: datetime) -> list[Finding]: ...
+    def evaluate(self, snap: RobotSnapshot, now: datetime, cfg: DetectionConfig) -> list[Finding]: ...
 
 @dataclass(frozen=True)
 class Finding:
+    rule: str
     dedup_key: str          # identifies "the same ongoing failure"
     severity: Severity
     title: str
@@ -150,37 +160,54 @@ class Finding:
     evidence: dict
 ```
 
-- MVP rules: `HeartbeatMissingRule`, `TopicRateRule` (degraded → WARNING, failed → CRITICAL), `NodeHealthRule`, `HighCpuRule`, `HighMemoryRule`, `LowBatteryRule`. Each rule is a small class with its own thresholds, and a registry holds the list.
+- Code: `backend/app/detection/` (`model.py`, `rules.py`, `topic_health.py`). Thresholds come from settings through `DetectionConfig`.
+- MVP rules: `HeartbeatMissingRule` (only while in a run, #019), `TopicRateRule` (degraded → WARNING, failed → CRITICAL), `NodeHealthRule`, `HighCpuRule`, `HighMemoryRule`, `LowBatteryRule`. Each rule is a small class with its own thresholds, and a registry holds the list.
 - **Rules are pure.** That makes them trivial to unit-test and, more importantly, lets the **same code run live, during re-detection replay, and in CI**.
 - **Two triggers:** event-driven (after ingest, for that robot) and time-driven (sweeper, all robots). A "data stopped arriving" condition can't trigger on ingest, because no request arrives.
-- **Reconciliation** (stateful, in `IncidentService`):
+- **Snapshot** (`Detector.snapshot`): built from current-state tables only. It includes run data (topics, nodes, metrics) only while the robot is in a run and the rows are fresh (DECISIONS #017).
+- **Reconciliation** (stateful, `backend/app/services/detection_service.py :: Detector.reconcile`):
   - a new `dedup_key` → open an incident (`INSERT … ON CONFLICT DO NOTHING` against the partial unique index)
   - an existing key at higher severity → escalate the same incident (no new incident)
-  - a key that is no longer reported for `resolve_after_s` → auto-resolve (hysteresis, so a flapping topic doesn't open and close incidents every second)
+  - a key that is no longer reported for `INCIDENT_RESOLVE_AFTER_S` → auto-resolve, **only while the robot is live** (hysteresis, so a flapping topic doesn't open and close incidents every second; #019)
+  - the robot reports its run ended → that run's data incidents resolve with reason "run ended" (#017)
+  - manual triage: OPEN → INVESTIGATING → RESOLVED via `PATCH /incidents/{id}`. RESOLVED is final, so a persisting condition opens a new incident.
 - **Topic health** is a pure function: `classify(expected_hz, actual_hz, last_msg_age_s, thresholds) → HEALTHY | DEGRADED | FAILED`.
 - Robot status is derived as: OFFLINE if not live; ERROR if a CRITICAL incident is open; DEGRADED if a WARNING incident is open; otherwise ONLINE.
 
 ## 7. Replay
 
 - **Backend:** `GET /runs/{id}/stream` returns the run's samples, topic samples, and events merged into one list ordered by `(ts, kind, id)`, with cursor pagination. It's stateless and read-only.
-- **Frontend:** a `ReplayClock` (play/pause/restart/seek, 1×/2×/4×) pulls the stream and dispatches frames into the **same reducer** the live WebSocket feeds. The dashboard can't tell live data from replay data, so we don't build two UIs.
+- **Frontend:** `frontend/src/replay/ReplayClock.ts` (play/pause/restart/seek, 1×–16×, incident markers on the scrubber) pulls the stream and dispatches frames into the **same reducer** (`frontend/src/state/robotReducer.ts`) the live WebSocket feeds, and both render `RobotView`. The dashboard can't tell live data from replay data, so we don't build two UIs.
 - Why the client paces the replay: the server keeps no per-viewer session state, seeking is trivial, and it scales like any read. A server-paced WS replay would need session lifecycle, backpressure, and cleanup, and the MVP doesn't need any of that.
-- **Phase 2: re-detection replay.** Feed a recorded run's snapshots through the *current* rule set to answer "would the new rules have caught this, and how much earlier?"
+- **Not built yet: re-detection replay.** Feed a recorded run's snapshots through the *current* rule set to answer "would the new rules have caught this, and how much earlier?"
 
 ### What replay does *not* do (important)
 Replaying a *recording* doesn't run new robot software, so a recorded run always gives the same result. Regression testing of a new software version works by **producing a new run** (CI starts the simulator or ROS 2 sim with the new build) and then running `openfleet check` on it and comparing it with a baseline run. Re-running *robot software* against recorded sensor data (rosbag2/MCAP playback) is a Phase 3 capability.
 
 ## 8. Realtime
 
-- `WS /api/v1/ws/fleet`: robot status changes, incidents opened/resolved.
-- `WS /api/v1/ws/robots/{robot_id}`: live samples and events for one robot.
-- Services publish **after the transaction commits**, so the UI never shows data that could still roll back.
+- `WS /api/v1/ws/fleet`: `{"type": "robot"}` and `{"type": "incident"}` messages for every robot.
+- `WS /api/v1/ws/robots/{robot_id}`: the same plus `{"type": "frame", "data": Frame}`. A frame (`sample` | `topic` | `event`) has exactly the shape of a replay stream item.
+- Hub: `backend/app/realtime/hub.py`. Bounded per-subscriber queues; a slow client drops its oldest messages and never blocks ingest.
+- Services publish **after the transaction commits** (`Service.commit()` in `services/base.py` flushes an outbox), so the UI never shows data that could still roll back.
 - WS messages are hints. On connect or reconnect the client loads current state over REST, then applies deltas.
 
-## 9. Configuration (planned)
+## 9. Configuration
 
-Use `pydantic-settings` with environment variables prefixed `OPENFLEET_` (implemented in `backend/app/core/config.py`; currently `DATABASE_URL`, `DB_CONNECT_TIMEOUT_S`, `LOG_LEVEL`). All timing and thresholds live here, never inline:
-`HEARTBEAT_TIMEOUT_S`, `SWEEP_INTERVAL_S`, `RUN_ABANDON_AFTER_S`, `INCIDENT_RESOLVE_AFTER_S`, `TOPIC_DEGRADED_RATIO`, `TOPIC_STALE_AFTER_S`, `CPU_HIGH_PCT`, `MEM_HIGH_PCT`, `BATTERY_CRITICAL_PCT`, `TIMELINE_LOOKBACK_S`.
+`pydantic-settings` with environment variables prefixed `OPENFLEET_` (`backend/app/core/config.py`). All timing and thresholds live here, never inline:
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `DATABASE_URL` | compose DB on `localhost:5433` | asyncpg URL |
+| `HEARTBEAT_TIMEOUT_S` | 10 | silence (server time) before a robot is not live |
+| `SWEEP_INTERVAL_S` / `SWEEPER_ENABLED` | 2 / true | sweeper cadence |
+| `RUN_ABANDON_AFTER_S` | 60 | silence before a RUNNING run is ABORTED |
+| `INCIDENT_RESOLVE_AFTER_S` | 10 | auto-resolve hysteresis |
+| `TIMELINE_LOOKBACK_S` | 60 | incident timeline lead-up window |
+| `TOPIC_DEGRADED_RATIO` / `TOPIC_FAILED_RATIO` / `TOPIC_STALE_AFTER_S` | 0.7 / 0.1 / 3 | topic classification |
+| `CPU_HIGH_PCT` / `MEM_HIGH_PCT` | 90 / 90 | WARNING thresholds |
+| `BATTERY_LOW_PCT` / `BATTERY_CRITICAL_PCT` | 25 / 10 | WARNING / CRITICAL |
+| `CORS_ORIGINS` | `["http://localhost:5173"]` | dev server origin (nginx serves the UI same-origin in compose) |
 
 ## 10. Known scaling limits
 

@@ -5,6 +5,7 @@ robot -> runs -> incidents). Two triggers (DECISIONS #006): after ingest/heartbe
 robot, and from the sweeper for robots that went silent.
 """
 
+from dataclasses import replace
 from datetime import datetime, timedelta
 
 from app.core.config import Settings
@@ -39,14 +40,27 @@ class Detector:
         self.incidents = IncidentRepository(svc.session)
         self.states = StateRepository(svc.session)
 
-    async def snapshot(self, robot: Robot) -> RobotSnapshot:
-        topics = await self.states.topics(robot.id)
-        nodes = await self.states.nodes(robot.id)
-        return RobotSnapshot(
+    async def snapshot(self, robot: Robot, now: datetime) -> RobotSnapshot:
+        """Run data (topics, nodes, system metrics) only counts while the robot is in a run
+        and only if refreshed within the heartbeat timeout: telemetry flows only during runs,
+        and the last values of a finished run must not keep firing rules (DECISIONS #017)."""
+        base = RobotSnapshot(
             robot_id=robot.id,
             last_seen_at=robot.last_seen_at,
             current_run_id=robot.current_run_id,
             software_version=robot.software_version,
+        )
+        if robot.current_run_id is None:
+            return base
+        fresh_after = now - timedelta(seconds=self.cfg.heartbeat_timeout_s)
+        topics = [
+            t for t in (await self.states.topics(robot.id)).values() if t.updated_at >= fresh_after
+        ]
+        nodes = [
+            n for n in (await self.states.nodes(robot.id)).values() if n.updated_at >= fresh_after
+        ]
+        return replace(
+            base,
             cpu_pct=robot.cpu_pct,
             mem_pct=robot.mem_pct,
             battery_pct=robot.battery_pct,
@@ -58,13 +72,20 @@ class Detector:
                     actual_hz=t.actual_hz,
                     last_msg_age_s=t.last_msg_age_s,
                 )
-                for t in topics.values()
+                for t in topics
             ),
-            nodes=tuple(NodeView(node=n.node, state=NodeState(n.state)) for n in nodes.values()),
+            nodes=tuple(NodeView(node=n.node, state=NodeState(n.state)) for n in nodes),
         )
 
+    async def resolve_run_incidents(self, robot: Robot, run_id, now: datetime) -> None:
+        """The robot reported its run as ended: problems observed in that run's data are
+        over. Heartbeat incidents stay: they are about the robot, not the run's data."""
+        for inc in await self.incidents.unresolved_for_robot(robot.id, for_update=True):
+            if inc.run_id == run_id and inc.rule != "heartbeat_missing":
+                await self._resolve(robot, inc, now, reason="run ended")
+
     async def evaluate(self, robot: Robot, now: datetime) -> None:
-        snap = await self.snapshot(robot)
+        snap = await self.snapshot(robot, now)
         live = snap.is_live(now, self.cfg.heartbeat_timeout_s)
         findings = evaluate_all(snap, now, self.cfg)
         open_incidents = await self.reconcile(robot, findings, now, live)

@@ -140,3 +140,37 @@ Don't edit old decisions to change them. Add a new entry that supersedes the old
 - `ended_at` of an auto-aborted run is an upper bound, not the true end.
 - The sweeper (`RUN_ABANDON_AFTER_S`) is still needed for robots that go silent without starting a new run.
 **Date:** 2026-11-05
+
+## 017 — Detection only trusts fresh, in-run data; ending a run resolves that run's data incidents
+**Status:** Accepted (2026-11-05)
+**Decision:**
+- The detection snapshot includes topics, nodes and system metrics only while the robot has a current run, and only rows refreshed (server time) within `HEARTBEAT_TIMEOUT_S`.
+- When the robot reports a run as ended, the unresolved incidents attached to that run are resolved with reason "run ended". `heartbeat_missing` incidents are the exception.
+**Why:** Telemetry only flows during runs. Without this:
+- The last values of a finished run would keep firing rules forever. A robot that ended its run with `/scan` degraded and then idled would hold a never-ending incident.
+- A topic that stopped being reported would freeze in its last state.
+
+Both showed up in the first end-to-end demo.
+**Alternatives considered:** Delete `topic_states` and `node_states` at run end. That loses the "last known state" the dashboard shows.
+**Tradeoffs:** A problem that really persists across runs (for example a broken LiDAR) gets one incident per run, not one long incident. That arguably matches how runs are compared anyway.
+**Date:** 2026-11-05
+
+## 018 — Ingest and detection run in one transaction per request
+**Status:** Accepted (2026-11-05). This refines the planned flow in ARCHITECTURE §5 (commit, then detect).
+**Decision:** `POST /runs/{id}/telemetry` stores the batch, updates current state, emits change events, runs detection and reconciles incidents in one transaction, holding the robot row lock. Heartbeats and run start/end do the same.
+**Why:**
+- The incident and robot-status changes are always consistent with the data that caused them.
+- A crash between "data committed" and "detection ran" can't leave a robot DEGRADED with no incident, or the reverse.
+- The robot lock already serializes everything per robot, and rule evaluation is microseconds.
+**Tradeoffs:** Ingest latency includes detection. This is the first thing to move behind a queue at scale (ARCHITECTURE §10).
+**Date:** 2026-11-05
+
+## 019 — Liveness semantics: an offline robot's incidents are never auto-resolved; heartbeat loss is an incident only during a run
+**Status:** Accepted (2026-11-05)
+**Decision:**
+- Auto-resolve (absence of a finding for `INCIDENT_RESOLVE_AFTER_S`) only happens while the robot is live.
+- `HeartbeatMissingRule` fires only when the robot goes silent with a RUNNING run. An idle robot that powers off just becomes OFFLINE.
+- The sweeper aborts the run after `RUN_ABANDON_AFTER_S`, but the heartbeat incident stays open until the robot is heard from again.
+**Why:** While a robot is offline we can't observe that a problem cleared, so silence must not read as recovery. Robots that are switched off at the end of a shift shouldn't page anyone.
+**Tradeoffs:** A robot that dies mid-run and never returns keeps an open incident until someone resolves it by hand. That's intentional.
+**Date:** 2026-11-05

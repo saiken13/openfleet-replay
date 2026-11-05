@@ -45,6 +45,17 @@ class TelemetryRepository:
         )
         return list(reversed(list(await self.session.scalars(stmt))))
 
+    async def recent_topic_samples(
+        self, robot_id: str, since: datetime, limit: int
+    ) -> list[TopicSample]:
+        stmt = (
+            select(TopicSample)
+            .where(TopicSample.robot_id == robot_id, TopicSample.received_at >= since)
+            .order_by(TopicSample.received_at.desc(), TopicSample.id.desc())
+            .limit(limit)
+        )
+        return list(reversed(list(await self.session.scalars(stmt))))
+
     async def downsampled_window(
         self, robot_id: str, start: datetime, end: datetime, max_points: int
     ) -> list[TelemetrySample]:

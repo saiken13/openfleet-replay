@@ -12,7 +12,7 @@ import logging
 import os
 import sys
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -51,7 +51,10 @@ async def run_scenario(
     start_wall = loop.time()
     for i in range(ticks):
         t = i * sc.tick_s
-        batches = [(r, r.step(t, t0)) for r in robots]
+        # Robot clock: real wall time in real-time mode (as a real robot would report);
+        # synthetic, evenly spaced time in --fast mode.
+        ts = t0 + timedelta(seconds=t) if fast else datetime.now(UTC)
+        batches = [(r, r.step(t, ts)) for r in robots]
         await asyncio.gather(
             *(api.telemetry(runs[r.robot_id], b) for r, b in batches if b is not None)
         )
@@ -60,7 +63,7 @@ async def run_scenario(
             await asyncio.sleep(max(0.0, target - loop.time()))
 
     end_t = ticks * sc.tick_s
-    ended_at = datetime.fromtimestamp(t0.timestamp() + end_t, UTC).isoformat()
+    ended_at = (t0 + timedelta(seconds=end_t) if fast else datetime.now(UTC)).isoformat()
     for r in robots:
         if r.is_offline(end_t):
             log.info("%s is offline at the end; leaving its run for the sweeper", r.robot_id)

@@ -111,6 +111,7 @@ class RunService(Service):
 
         await self.finish_run(robot, run, status, ended_at, reason="reported by robot")
         if now is not None:
+            await Detector(self, self.settings).resolve_run_incidents(robot, run.id, now)
             await self._contact_and_detect(robot, now)
         await self.commit()
         return run

@@ -2,22 +2,78 @@
 
 **Observability, incident debugging, and replay for ROS 2 robot fleets.**
 
-> ⚠️ **Status: early development (Phase 1).** The backend runs with a health check, the robots/runs schema, and robot registration, and the run lifecycle (start, end, list). Features below are the MVP target. See [HANDOFF.md](HANDOFF.md) for current progress.
+When a robot fails in production, engineers need to answer these questions:
+- What happened?
+- Which node or topic failed first?
+- What changed in the seconds before?
+- Which software version was running?
+- Does the next version fix it or break something else?
 
-When a robot fails in production, engineers need to answer: *What happened? Which node or topic failed first? What changed in the seconds before? Which software version was running? Does the next version fix it or break something else?*
+OpenFleet Replay collects robot telemetry and tracks the health of ROS topics and nodes. It detects failures and opens deduplicated incidents, each with a timeline of what led up to it. You can **replay** a recorded run on the same dashboard used for live data, or **compare** two runs across software versions, either in the UI or as a CI gate.
 
-OpenFleet Replay collects robot telemetry, tracks ROS topic and node health, detects failures, opens deduplicated incidents with a timeline of what led up to them, and lets you **replay** a recorded run or **compare** two runs across software versions.
+## What it does
 
-## What it does (MVP scope)
+- **Fleet health:** robots register and heartbeat. OpenFleet derives ONLINE / OFFLINE / DEGRADED / ERROR from liveness (server time) and open incidents.
+- **Topic and node monitoring:** expected vs. actual Hz per topic (`/scan` 15 Hz → 4 Hz → 0 Hz), plus node state.
+- **Failure detection:** pure, unit-tested rules: heartbeat missing during a run, topic rate, node health, CPU, memory, battery.
+- **Incidents:**
+  - Opened automatically and deduplicated by a database constraint.
+  - Escalated in place (WARNING → CRITICAL).
+  - Auto-resolved with hysteresis. Never auto-resolved while the robot is offline.
+  - Each has a timeline showing what happened first.
+- **Runs:** every operating session is recorded with its software version. Starting and ending runs is idempotent (client-generated IDs).
+- **Replay:** scrub through a past run at 1×–16×. The frontend feeds replay frames into the *same reducer* as the live WebSocket, so there's one UI, not two.
+- **Compare and check:**
+  - Diff two runs in the UI.
+  - Or gate CI with `openfleet check RUN --config regression.yaml [--baseline RUN]`, which exits 1 on regression.
+- **Simulator:** no robot required. Seeded YAML scenarios script failures, so every demo is reproducible.
 
-- **Fleet health:** robots register and heartbeat, and OpenFleet derives ONLINE / OFFLINE / DEGRADED / ERROR.
-- **Topic and node monitoring:** expected vs. actual Hz per topic (e.g. `/scan` 15 Hz → 4 Hz → 0 Hz), node state.
-- **Failure detection:** modular rules (heartbeat missing, topic rate, node health, CPU, memory, battery).
-- **Incidents:** opened automatically, deduplicated, escalated, and auto-resolved, each with a pre-failure timeline.
-- **Runs:** every operating session is recorded with its software version.
-- **Replay:** scrub through a past run at 1×/2×/4× on the same dashboard used for live data.
-- **Compare and check:** diff two runs, or assert `/scan >= 10 Hz` and "no CRITICAL incidents" from a CLI that returns a non-zero exit code on failure.
-- **Simulator:** no robot required. Scripted failure scenarios make every demo reproducible.
+## Quick start
+
+Requires Docker.
+
+```bash
+git clone https://github.com/saiken13/openfleet-replay.git
+cd openfleet-replay
+docker compose --profile demo up --build
+```
+
+- **Dashboard:** http://localhost:8080
+- **API docs:** http://localhost:8000/docs
+
+The `demo` profile runs four simulated robots in a loop:
+- **amr-02:** its LiDAR degrades and then stops, and its driver crashes.
+- **amr-03:** CPU spikes.
+- **amr-04:** drops off the network mid-run.
+- **amr-01:** stays healthy as the control.
+
+Open the dashboard, click an incident, then **Replay from 15s before ▶**.
+
+Without `--profile demo` you get the platform with an empty fleet. Run the simulator yourself (see below).
+
+Postgres is published on host port **5433** (not 5432), so it doesn't clash with a locally installed Postgres. Override it with `OPENFLEET_PG_HOST_PORT`.
+
+## Regression gate in CI
+
+```bash
+pip install -e backend -e simulator
+openfleet-sim -s simulator/scenarios/healthy.yaml --fast -o base.json            # v1.0.0
+openfleet-sim -s simulator/scenarios/lidar_regression.yaml --fast -o cand.json   # v1.1.0
+openfleet check "$(jq -r '.[0].run_id' cand.json)" -c examples/regression.yaml \
+  --baseline "$(jq -r '.[0].run_id' base.json)"
+```
+
+```
+Run c9b8e261-…  robot=ci-01  version=1.1.0
+  [FAIL] topic /scan avg_hz                  7.63 (limit >= 10)
+  [FAIL] baseline topic /scan avg_hz drop %  14.92 → 7.63 Hz (+48.8% drop, limit 10%)
+  …
+12/14 checks passed                                        (exit code 1)
+```
+
+This exact flow runs in this repo's CI (`e2e-regression-check`). The healthy run must pass and the regression must fail.
+
+> Replay never re-runs robot software: a recording always gives the same result. To regression-test a new build, produce a **new run** with it (simulator or ROS 2 sim in CI), then `check` it against a baseline. See [ARCHITECTURE §7](docs/ARCHITECTURE.md).
 
 ## Architecture
 
@@ -29,49 +85,61 @@ flowchart LR
     CLI["openfleet CLI"] --> API
 ```
 
-A single backend process (modular monolith) contains the API, services, a pure-function detection engine, an incident reconciler, a liveness sweeper, and an in-process realtime hub.
-Details: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) · Why it's built this way: [docs/DECISIONS.md](docs/DECISIONS.md)
+A single backend process (a modular monolith) contains:
+- the API
+- services
+- a pure-function detection engine
+- an incident reconciler
+- a liveness sweeper
+- an in-process realtime hub
 
-## Quick start
+Details: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) · Why it's built this way: [docs/DECISIONS.md](docs/DECISIONS.md) · Request flows: [docs/FLOW.md](docs/FLOW.md)
 
-Requires Docker.
-
-```bash
-git clone https://github.com/saiken13/openfleet-replay.git
-cd openfleet-replay
-docker compose up --build
-curl http://localhost:8000/api/v1/health   # {"status":"ok","database":"ok"}
-# API docs: http://localhost:8000/docs
-```
-
-Postgres is published on host port **5433** (not 5432) so it doesn't clash with a locally installed Postgres. Override it with `OPENFLEET_PG_HOST_PORT`.
-
-### Backend development (without running the backend in Docker)
+## Development
 
 ```bash
 docker compose up -d postgres
+
+# Backend (Python 3.12)
 cd backend
 python3.12 -m venv .venv && .venv/bin/pip install -e ".[dev]"
 .venv/bin/alembic upgrade head
-.venv/bin/pytest            # real Postgres, in a separate `openfleet_test` DB (created automatically)
-.venv/bin/uvicorn app.main:app --reload
+.venv/bin/pytest                         # real Postgres, separate `openfleet_test` DB (auto-created)
+.venv/bin/uvicorn app.main:app --reload  # http://localhost:8000
+
+# Simulator
+cd simulator
+python3.12 -m venv .venv && .venv/bin/pip install -e ".[dev]"
+.venv/bin/openfleet-sim -s scenarios/demo.yaml            # real time
+.venv/bin/openfleet-sim -s scenarios/demo.yaml --speed 4  # compressed
+.venv/bin/pytest
+
+# Frontend (Node 22+)
+cd frontend
+npm install
+npm run dev        # http://localhost:5173, proxies /api to localhost:8000
+npm test && npm run typecheck
 ```
 
 ## Repository layout
 
 | Path | Contents |
 |---|---|
-| `backend/` | FastAPI app, detection engine, replay, Alembic migrations, tests |
-| `simulator/` | Simulated robots and failure scenarios (YAML) |
-| `frontend/` | React + TypeScript + Vite dashboard |
-| `docs/` | Architecture, decisions, flows, constraints, bugs, feature docs |
+| `backend/app/` | FastAPI app: `api/` (routers), `services/`, `repositories/` (SQL), `detection/` (pure rules), `realtime/` (hub), `workers/` (sweeper) |
+| `backend/openfleet_cli/` | `openfleet check` regression CLI (thin HTTP client) |
+| `backend/alembic/` | Migrations (CI runs `alembic check` so models and migrations can't drift) |
+| `simulator/` | Simulated robots + YAML failure scenarios (public API only) |
+| `frontend/` | React + TypeScript + Vite + Tailwind dashboard |
+| `examples/` | Example regression config |
+| `docs/` | Architecture, decisions, flows, constraints, bugs |
 
-## Documentation
+## Status and limits
 
-- [Architecture](docs/ARCHITECTURE.md): components, data model, detection, replay, scaling limits
-- [Decisions](docs/DECISIONS.md): why we chose what we chose
-- [Flows](docs/FLOW.md): how a request moves through the code
-- [Constraints](docs/CONSTRAINTS.md): rules for contributors (human or AI)
+This is an MVP. It's single-process by design. The known scaling limits and their evolution paths are listed in [ARCHITECTURE §10](docs/ARCHITECTURE.md). These aren't built yet:
+- the ROS 2 collector (the simulator speaks the same API)
+- authentication
+- re-detection replay
+- rosbag/MCAP recordings
 
 ## License
 

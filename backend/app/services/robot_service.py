@@ -3,7 +3,14 @@ from datetime import datetime, timedelta
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import Event, NodeStateRow, Robot, TelemetrySample, TopicState
+from app.db.models import (
+    Event,
+    NodeStateRow,
+    Robot,
+    TelemetrySample,
+    TopicSample,
+    TopicState,
+)
 from app.domain.errors import NotFoundError
 from app.realtime.hub import Hub
 from app.repositories.robot_repository import RobotRepository
@@ -67,3 +74,10 @@ class RobotService(Service):
         await self.get(robot_id)
         since = now - timedelta(seconds=seconds)
         return await TelemetryRepository(self.session).recent_samples(robot_id, since, limit)
+
+    async def recent_topic_samples(
+        self, robot_id: str, seconds: float, now: datetime, limit: int
+    ) -> list[TopicSample]:
+        await self.get(robot_id)
+        since = now - timedelta(seconds=seconds)
+        return await TelemetryRepository(self.session).recent_topic_samples(robot_id, since, limit)

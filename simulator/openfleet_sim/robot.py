@@ -4,7 +4,7 @@ batches (except for wall-clock timestamps, which the caller supplies)."""
 import math
 import random
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Any
 
 from openfleet_sim.scenario import (
@@ -42,9 +42,10 @@ class SimRobot:
     def is_offline(self, t: float) -> bool:
         return any(isinstance(f, OfflineFailure) for f in self._active(t))
 
-    def step(self, t: float, t0: datetime) -> dict[str, Any] | None:
-        """Advance to scenario time t (seconds since run start). Returns the telemetry batch,
-        or None while the robot is offline (it sends nothing)."""
+    def step(self, t: float, ts: datetime) -> dict[str, Any] | None:
+        """Advance to scenario time t (seconds since run start); `ts` is the robot-clock
+        timestamp to stamp the batch with. Returns the telemetry batch, or None while the
+        robot is offline (it sends nothing)."""
         sc = self.scenario
         active = self._active(t)
 
@@ -56,7 +57,6 @@ class SimRobot:
         if self.is_offline(t):
             return None
 
-        ts = t0 + timedelta(seconds=t)
         r = self.rng
         cpu = next((f.pct for f in active if isinstance(f, CpuFailure)), None)
         mem = next((f.pct for f in active if isinstance(f, MemoryFailure)), None)

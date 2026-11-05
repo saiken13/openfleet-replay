@@ -1,9 +1,10 @@
 # Execution Flows
 
-> **Status: planned.** The file and function names below are the *intended* locations.
-> When each flow is implemented, replace "(planned)" with the real `file:function` references and keep this document accurate.
+> **Status: implemented.** File and function references below are real. Keep them accurate when code moves.
+> Lock order everywhere: **robot row → run rows → incident rows** (DECISIONS #016).
+> Realtime: services queue messages and `Service.commit()` (`backend/app/services/base.py`) publishes them only after COMMIT.
 
-## 0. Health check (implemented)
+## 0. Health check
 
 ```
 GET /api/v1/health
@@ -15,7 +16,7 @@ GET /api/v1/health
 
 The engine is created in the app lifespan (`backend/app/main.py :: create_app()`) and disposed on shutdown. Tests build a fresh app per test with `create_app(settings)`.
 
-## 0b. Robot registration (implemented)
+## 0b. Robot registration
 
 ```
 Robot / collector (on boot, safe to retry)
@@ -32,7 +33,7 @@ GET /api/v1/robots/{robot_id} → RobotService.get() → 200 | 404
 
 A racing first registration blocks on the other's uncommitted insert, then falls through to the update (`tests/test_robot_registration_concurrency.py`).
 
-## 0c. Run lifecycle (implemented)
+## 0c. Run lifecycle
 
 ```
 Start (client-generated UUID, retry-safe)
@@ -46,7 +47,9 @@ Start (client-generated UUID, retry-safe)
     │    ├─ RunRepository.latest_for_robot()         ORDER BY started_at DESC, id DESC
     │    ├─ RunRepository.abort_running_except()     older RUNNING runs → ABORTED, ended_at = latest.started_at
     │    └─ RobotRepository.set_current_run()        current_run_id (+ software_version) or NULL
-    └─ COMMIT → 201 (run may already be ABORTED if it was a late-synced older run)
+    ├─ run_started event (+ run_ended for superseded runs, software_version_changed)
+    ├─ record_contact() + Detector.evaluate()      a run start is contact from the robot
+    └─ commit() → 201 (run may already be ABORTED if it was a late-synced older run)
 
 End
 → POST /api/v1/runs/{run_id}/end                   body: RunEnd {status: SUCCESS|FAILED|ABORTED, ended_at}
@@ -54,7 +57,9 @@ End
     ├─ lock robot row, then run row                  same order as start() → no deadlock (tests/test_concurrency.py)
     ├─ already terminal: same status → 200 (no change) | different → 409
     ├─ ended_at < started_at → 422
-    └─ set status/ended_at; clear robots.current_run_id if it pointed here → COMMIT → 200
+    ├─ finish_run(): status/ended_at, clear robots.current_run_id, run_ended event
+    ├─ Detector.resolve_run_incidents()            that run's data incidents → RESOLVED (#017)
+    └─ record_contact() + Detector.evaluate() → commit() → 200
 
 Read
 → GET /api/v1/runs/{run_id}                         200 | 404
@@ -63,77 +68,96 @@ Read
 
 Errors: services raise `app/domain/errors.py` exceptions. `app/api/errors.py` maps them in one place (NotFound → 404, Conflict → 409, InvalidRequest → 422) to `{"detail": "..."}`.
 
-## 1. Telemetry ingest (planned — Phase 6–9)
+## 1. Telemetry ingest
 
 ```
 Simulator / collector (1 batch per robot per ~1s)
-→ POST /api/v1/runs/{run_id}/telemetry            body: TelemetryBatch {seq, ts, metrics, pose, topics[], nodes[], logs[]}
-→ app/api/v1/telemetry.py :: ingest_batch()        Pydantic validation → 422 on malformed input
-→ app/services/telemetry_service.py :: ingest()
-    ├─ load run; 404 if unknown, 409 if run is not RUNNING
-    ├─ BEGIN
-    │   ├─ TelemetryRepository.insert_sample()      ON CONFLICT (run_id, seq) DO NOTHING
-    │   │     └─ if duplicate → return early (idempotent retry, 200)
-    │   ├─ TelemetryRepository.insert_topic_samples()
-    │   ├─ StateRepository.upsert_topic_states()   classify() each topic → detect status changes
-    │   ├─ StateRepository.upsert_node_states()    detect state changes
-    │   ├─ EventRepository.insert_many()           change-events + forwarded logs
-    │   └─ RobotRepository.touch()                 last_seen_at = server now, latest metrics
-    ├─ COMMIT
-    ├─ DetectionService.evaluate_robot(robot_id)    → see flow 3
-    └─ RealtimeHub.publish(...)                     after commit only
+→ POST /api/v1/runs/{run_id}/telemetry           body: TelemetryBatch {seq, ts, metrics, pose, topics[], nodes[], logs[]}
+→ backend/app/api/v1/runs.py :: ingest_telemetry()   Pydantic validation → 422 (tz-aware ts, 0–100 %, ≤200 topics…)
+→ backend/app/services/telemetry_service.py :: TelemetryService.ingest()      ONE transaction (DECISIONS #018)
+    ├─ run unknown → 404; lock robot row; run not RUNNING → 409
+    ├─ TelemetryRepository.insert_sample()      ON CONFLICT (run_id, seq) DO NOTHING
+    │     └─ duplicate → rollback, 200 {duplicate: true}   (idempotent retry)
+    ├─ _ingest_topics(): classify_topic() each → topic_samples + topic_states; topic_status_changed on change
+    ├─ _ingest_nodes(): node_states; node_state_changed on change
+    ├─ _ingest_logs(): each log → events(type=log)
+    ├─ robot metrics + record_contact()         last_seen_at = server now
+    ├─ Detector.evaluate(robot, now)            → flow 3
+    └─ commit() → publish frames (sample/topic/event), robot, incidents
 → 200 {accepted: true, duplicate: false}
 ```
 
-## 2. Heartbeat and offline detection (planned — Phase 3–4)
+## 2. Heartbeat and liveness
 
 ```
 Robot
-→ POST /api/v1/robots/{robot_id}/heartbeat        {ts, software_version, state}
-→ app/api/v1/robots.py :: heartbeat()
-→ app/services/robot_service.py :: record_heartbeat()
-    ├─ last_seen_at = server now   (never robot ts — clocks drift)
-    ├─ if version changed → software_version_changed event
-    └─ if status was OFFLINE → re-derive status, emit robot_status_changed
+→ POST /api/v1/robots/{robot_id}/heartbeat      {ts?, software_version?}
+→ backend/app/api/v1/robots.py :: heartbeat()
+→ backend/app/services/liveness_service.py :: LivenessService.heartbeat()
+    ├─ lock robot; last_seen_at = server now   (never robot ts — DECISIONS #010)
+    ├─ record_software_version()                software_version_changed event if it changed
+    ├─ Detector.evaluate()                       e.g. OFFLINE → ONLINE (robot_status_changed)
+    └─ commit()
 → 204
 
-Sweeper (every SWEEP_INTERVAL_S)
-→ app/workers/sweeper.py :: tick()
-→ RobotService.mark_stale_offline(now)  last_seen_at < now - HEARTBEAT_TIMEOUT_S
-→ DetectionService.evaluate_robot() for each affected robot
-→ RunService.abort_abandoned(now)       RUNNING runs on robots offline > RUN_ABANDON_AFTER_S
+Sweeper (every SWEEP_INTERVAL_S; started in app lifespan, backend/app/main.py)
+→ backend/app/workers/sweeper.py :: Sweeper.tick(now)      (now injectable for tests)
+→ LivenessService.mark_stale_offline(now)      robots not OFFLINE with last_seen_at < now - HEARTBEAT_TIMEOUT_S
+     └─ per robot: lock, Detector.evaluate()  → OFFLINE; heartbeat_missing incident if in a run (#019)
+→ LivenessService.abort_abandoned_runs(now)    OFFLINE robots with a current run, silent > RUN_ABANDON_AFTER_S
+     └─ per robot: RunService.finish_run(ABORTED, reason="abandoned"); run_ended event
 ```
 
-## 3. Detection → incident (planned — Phase 9)
+## 3. Detection → incident
 
 ```
-DetectionService.evaluate_robot(robot_id, now)
-→ SnapshotBuilder.build(robot_id)          reads robots + topic_states + node_states (no history scans)
-→ for rule in RULES: rule.evaluate(snapshot, now) → findings   (pure, app/detection/rules/*.py)
-→ IncidentService.reconcile(robot_id, findings, now)
-    ├─ new dedup_key        → INSERT … ON CONFLICT DO NOTHING (partial unique index) + incident_opened event
-    ├─ higher severity      → UPDATE severity + incident_escalated event
-    └─ key absent ≥ RESOLVE_AFTER_S → status=RESOLVED, resolved_at + incident_resolved event
-→ RobotService.derive_status()             ERROR / DEGRADED / ONLINE
-→ RealtimeHub.publish(incident + status changes)
+backend/app/services/detection_service.py :: Detector.evaluate(robot, now)     (caller holds robot lock)
+→ snapshot(robot, now)          robots + topic_states + node_states; run data only if in a run & fresh (#017)
+→ backend/app/detection/rules.py :: evaluate_all(snapshot, now, cfg)   pure; one finding per dedup_key
+→ reconcile(robot, findings, now, live)
+    ├─ new dedup_key      → IncidentRepository.open_if_absent()  INSERT … ON CONFLICT DO NOTHING (partial unique index)
+    │                        + incident_opened event
+    ├─ same key           → last_detected_at = now; higher severity → escalate + incident_escalated
+    └─ key absent ≥ INCIDENT_RESOLVE_AFTER_S and robot live → RESOLVED + incident_resolved   (#019)
+→ _apply_status()               derive_robot_status() (backend/app/domain/status.py); robot_status_changed on change
+
+Run ended by the robot → Detector.resolve_run_incidents()  (reason "run ended", #017)
+Manual triage → PATCH /api/v1/incidents/{id} → IncidentService.update_status() → re-evaluate robot status
 ```
 
-## 4. Incident timeline (planned — Phase 10)
+## 4. Incident timeline
 
 ```
 GET /api/v1/incidents/{id}/timeline
-→ IncidentService.timeline(id)
-→ EventRepository.window(robot_id, started_at - TIMELINE_LOOKBACK_S, resolved_at or now)
-  + TelemetryRepository.downsampled(...)  (context points)
-→ ordered by ts → TimelineEntry[]
+→ backend/app/services/incident_service.py :: IncidentService.timeline()
+→ window = [started_at - TIMELINE_LOOKBACK_S, resolved_at or now]   (server receive time)
+→ EventRepository.window_for_robot()                   ordered by robot ts
+  + TelemetryRepository.downsampled_window()            ≤300 samples (every n-th row)
+  + TelemetryRepository.downsampled_topic_window()      ≤150 points per topic
+→ IncidentTimeline {incident, events, samples, topic_samples}
 ```
 
-## 5. Replay (planned — Phase 13)
+## 5. Replay
 
 ```
-Frontend ReplayPage
-→ GET /api/v1/runs/{id}/stream?cursor=…   (paged)
-→ app/replay/stream.py :: merged_stream()  samples ∪ topic_samples ∪ events ORDER BY ts, kind, id
-→ frontend/src/replay/ReplayClock.ts        play/pause/seek/speed; emits frames at (ts - t0) / speed
-→ dispatch(frame) → fleetReducer            same reducer the live WebSocket feeds
+frontend/src/pages/RunPage.tsx
+→ fetchWholeStream(): GET /api/v1/runs/{id}/stream?cursor=…   (paged)
+   → backend/app/services/analysis_service.py :: AnalysisService.stream()
+     samples ∪ topic_samples ∪ events, keyset (ts, kind_rank, id) per source, merged, opaque cursor
+→ frontend/src/replay/ReplayClock.ts      play/pause/seek/speed; emits frames by robot-time offset
+→ dispatch({type: "frames"}) → frontend/src/state/robotReducer.ts     the same reducer live WS frames feed
+→ frontend/src/components/RobotView.tsx   the same component the live robot page renders
+```
+
+## 6. Compare and regression check
+
+```
+GET /api/v1/runs/{id}/summary  → AnalysisService.summary()   SQL aggregates (analysis_repository.py):
+                                 avg/min/p05 Hz, % time per topic status, cpu/mem/battery, incidents by severity
+GET /api/v1/runs/compare?base&candidate → AnalysisService.compare()   per-topic Δ%, metric Δ, incident Δ
+
+openfleet check RUN -c regression.yaml [--baseline RUN]
+→ backend/openfleet_cli/main.py   GET summary (and baseline summary)
+→ backend/openfleet_cli/checks.py :: evaluate()    pure assertions on the server's numbers (no re-detection)
+→ exit 0 pass | 1 fail | 2 error
 ```

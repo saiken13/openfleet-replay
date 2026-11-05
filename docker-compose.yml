@@ -31,6 +31,15 @@ services:
       timeout: 3s
       retries: 40
 
+  # Dashboard (static build behind nginx, which also proxies /api and WebSockets)
+  frontend:
+    build: ./frontend
+    ports:
+      - "8080:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+
   # Simulated fleet running the demo scenario in a loop. Opt in:  docker compose --profile demo up
   simulator:
     build: ./simulator

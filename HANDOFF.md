@@ -7,72 +7,78 @@
 - **Latest commit:** see `git log -1`
 
 ## Current state
-Phase 1, step 3 is done: the run lifecycle API. Steps 1 (skeleton) and 2 (schema and robot registration) were done earlier.
+**The MVP is complete.** Everything in the README's "What it does" section is implemented, tested, and checked end to end with the real stack:
+- Docker Compose: Postgres + backend + nginx frontend + simulator
+- Screenshots taken of the fleet, incident and replay pages
+
+CI has four jobs: backend, simulator, frontend, and `e2e-regression-check`.
 
 ## Completed
-- **Docs:** DECISIONS 001–016 are all **Accepted**.
-- **Skeleton:**
-  - FastAPI app factory and `pydantic-settings` config
-  - `GET /api/v1/health`
-  - Docker Compose, plus GitHub Actions CI (ruff, `alembic upgrade`, `alembic check`, pytest)
-- **Schema:** `robots` and `runs` (migration `0001`). Status columns are TEXT + CHECK (#015).
-- **Robots:**
-  - `PUT /api/v1/robots/{id}`: idempotent identity upsert
-  - `GET /api/v1/robots/{id}`
-  - `GET /api/v1/robots/{id}/runs?limit=&cursor=`: newest first, keyset pagination on (started_at, id), opaque cursor
-- **Runs:**
-  - `PUT /api/v1/runs/{run_id}`: client UUID. Returns 201 on create, 200 for an identical retry, 409 if the run exists for another robot or with different values, and 404 for an unknown robot.
-  - `POST /api/v1/runs/{run_id}/end`: RUNNING → SUCCESS, FAILED or ABORTED. The same terminal status again returns 200; a different one returns 409. An `ended_at` before `started_at` returns 422.
-  - `GET /api/v1/runs/{run_id}`
-  - **One RUNNING run per robot (#016):** a newer start aborts older RUNNING runs, and late-synced older runs never become current or roll the version back.
-- **Errors:** services raise `app/domain/errors.py` exceptions (NotFound, Conflict, InvalidRequest). `app/api/errors.py` maps them to 404, 409 and 422.
-- **Tests (55):**
-  - health, robots, runs, migration round-trip
-  - `tests/test_concurrency.py` with real commits:
-    - registration race
-    - 6 concurrent run starts leave exactly one RUNNING run
-    - run start racing run end never deadlocks. A mutation check confirmed it: reversing the lock order produced `DeadlockDetectedError`.
+- **Backend** (`backend/app/`):
+  - Registration, runs (#013, #016), telemetry ingest, heartbeat.
+  - Sweeper.
+  - Pure detection rules plus the reconciler (dedup #007, escalation, hysteresis, offline semantics #019, run-data freshness #017).
+  - Incidents API with triage and timeline.
+  - Realtime hub and WebSockets.
+  - Replay stream, run summary, and compare.
+- **CLI** (`backend/openfleet_cli/`): `openfleet check RUN -c regression.yaml [--baseline RUN] [--json]`, with exit code 0, 1 or 2.
+- **Simulator** (`simulator/`):
+  - Seeded YAML scenarios: `demo`, `healthy`, `lidar_regression`.
+  - Failure kinds: topic_rate, node_state, cpu, memory, battery_drain, offline, log.
+  - Modes: real time, `--fast`, and `--loop`.
+- **Frontend** (`frontend/`): fleet, robot (live), incidents, incident detail (charts, timeline, first signal, triage), runs, run replay, and compare.
+- **Tests:**
+  - Backend: 121, against real Postgres, including concurrency races and mutation-checked guards.
+  - Simulator: 9.
+  - Frontend: 11 (reducer and ReplayClock).
+- **Docs:** README, ARCHITECTURE, FLOW (real file:function paths), DECISIONS 001–019, BUGS 001–003, CONSTRAINTS.
 
 ## Currently working
 Nothing in progress.
 
-## Partially implemented
-- `robots.software_version` changes aren't recorded as events yet, because the `events` table doesn't exist. Add a `software_version_changed` event when it does.
-- Nothing sets `robots.status` yet. It stays OFFLINE until heartbeats exist.
+## Not built yet (deliberately out of MVP scope)
+- **ROS 2 collector:** a `rclpy` node that measures topic Hz and node state and posts batches. The API contract is the simulator's.
+- **Re-detection replay:** run current rules over a recorded run's snapshots.
+- **Authentication and multi-tenant support.**
+- **rosbag2/MCAP storage:** object storage.
+- **Scaling work** (ARCHITECTURE §10): advisory lock for the sweeper, Redis/NATS fan-out, TimescaleDB, and retention.
 
 ## Known bugs
-None.
+None open. Fixed bugs are recorded in docs/BUGS.md.
 
 ## Gotchas
-- **Host port 5433:** the owner's Mac runs Homebrew Postgres on 5432, so compose publishes Postgres on host port 5433. CI uses 5432.
-- **Lock order:** always lock the robot row before any run rows. `RunService.start()` and `end()` both follow this, and new code that touches both must too (#016).
-- **Real-commit tests:** tests that commit for real go in `tests/test_concurrency.py`. Use robot ids starting with `concurrency-`; the `sessions` fixture deletes those rows afterwards.
-- **Alembic in tests:** tests run Alembic through `run_in_fresh_thread()`, because `env.py` calls `asyncio.run()`.
-- **Enum changes:** changing a `StrEnum` needs a migration that updates the CHECK constraint, and `alembic check` won't catch it (#015).
-- **Timestamps in tests:** `now()` is constant within a rolled-back test, so don't assert on `updated_at` changes there.
-- **422 literal:** `app/api/errors.py` uses a literal 422, because Starlette renamed that status constant.
+- **Ports:**
+  - Postgres is on host port **5433**, because the owner's Mac runs Homebrew Postgres on 5432.
+  - Dashboard on **8080** (nginx); dev server on 5173.
+- **Lock order:** robot → runs → incidents, everywhere.
+- **Realtime publishing:** services must publish only through `Service.commit()` / `publish_after_commit()`.
+- **Test fixtures:**
+  - The `clock` fixture controls server time for API tests.
+  - The `sweeper` fixture shares the test transaction; call `await sweeper.tick(now)`.
+- **Real-commit tests** go in `tests/test_concurrency.py`, using ids prefixed `concurrency-`. `purge_robots()` cleans them up.
+- **Alembic in tests:** runs through `run_in_fresh_thread()`.
+- **Enum changes:** changing a `StrEnum` needs a migration that updates the CHECK constraint (#015).
+- **Clocks:** incident times are server time and frame times are robot time. They're aligned when robot clocks are roughly correct, which the simulator ensures in real-time mode (BUG-003).
+- **Fast mode:** in `openfleet-sim --fast`, incidents don't auto-resolve within the run, because hysteresis uses server time. This is expected.
+- **Wrong Vite version:** running `npx vite` may pick up a different global Vite. Use `npm run dev`.
 
 ## How to start the system
 ```bash
-docker compose up --build
-curl -X PUT localhost:8000/api/v1/robots/robot-01 -H 'content-type: application/json' -d '{"name":"Robot 1"}'
-curl -X PUT localhost:8000/api/v1/runs/$(uuidgen) -H 'content-type: application/json' \
-  -d '{"robot_id":"robot-01","software_version":"1.0.0","started_at":"2026-11-05T10:00:00Z"}'
+docker compose --profile demo up --build      # dashboard http://localhost:8080
 ```
 
 ## How to run tests
 ```bash
 docker compose up -d postgres
-cd backend && .venv/bin/pytest -v
+(cd backend && .venv/bin/pytest)
+(cd simulator && .venv/bin/pytest)
+(cd frontend && npm test && npm run typecheck)
 ```
-(First time: `python3.12 -m venv .venv && .venv/bin/pip install -e ".[dev]"`.)
 
 ## Recommended next task
-**Phase 1, step 4: heartbeat and liveness** (FLOW.md §2).
-1. `POST /api/v1/robots/{robot_id}/heartbeat {ts, software_version?}` sets `last_seen_at` to **server** time (#010) and returns 204. A heartbeat from an OFFLINE robot marks it ONLINE for now; DEGRADED and ERROR come with incidents later.
-2. Settings: `HEARTBEAT_TIMEOUT_S`, `SWEEP_INTERVAL_S`, `RUN_ABANDON_AFTER_S`.
-3. Sweeper (`app/workers/sweeper.py`): a periodic task started in the lifespan.
-   - `mark_stale_offline(now)` marks robots OFFLINE when `last_seen_at < now - timeout`.
-   - `abort_abandoned(now)` aborts RUNNING runs on robots that have been offline longer than `RUN_ABANDON_AFTER_S`.
-   - Make `tick(now)` callable directly, so tests don't depend on wall-clock time.
-4. Decide whether to build the `events` table now (for `robot_status_changed` and `software_version_changed`) or in the next step. Recommendation: now, since the heartbeat is the first producer of events.
+**ROS 2 collector** (`collector/`):
+1. An `rclpy` node with a configurable topic list and expected rates.
+2. Measure Hz and last-message age per topic over a 1 s window, and node liveness via the ROS graph.
+3. POST the same `TelemetryBatch` the simulator sends.
+4. Reuse the simulator's `FleetApi` retry semantics.
+5. Test it in a ROS 2 Humble/Jazzy container in CI.

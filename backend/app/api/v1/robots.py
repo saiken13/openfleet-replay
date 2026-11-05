@@ -10,6 +10,7 @@ from app.schemas.telemetry import (
     Heartbeat,
     NodeStateRead,
     SampleRead,
+    TopicSampleRead,
     TopicStateRead,
 )
 from app.services.liveness_service import LivenessService
@@ -109,6 +110,23 @@ async def robot_telemetry(
 ) -> list[SampleRead]:
     rows = await RobotService(session).recent_telemetry(robot_id, seconds, now, limit)
     return [SampleRead.model_validate(r) for r in rows]
+
+
+@router.get(
+    "/{robot_id}/topic-history",
+    response_model=list[TopicSampleRead],
+    responses=NOT_FOUND,
+    summary="Recent per-topic rate samples (by server receive time), oldest first",
+)
+async def robot_topic_history(
+    robot_id: RobotId,
+    session: SessionDep,
+    now: NowDep,
+    seconds: Annotated[float, Query(gt=0, le=3600)] = 180,
+    limit: Annotated[int, Query(ge=1, le=20000)] = 5000,
+) -> list[TopicSampleRead]:
+    rows = await RobotService(session).recent_topic_samples(robot_id, seconds, now, limit)
+    return [TopicSampleRead.model_validate(r) for r in rows]
 
 
 @router.get(
