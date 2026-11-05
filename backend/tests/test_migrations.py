@@ -34,4 +34,13 @@ def test_migrations_round_trip(migrated_database: str) -> None:
     assert _table_names(migrated_database) == {"alembic_version"}
 
     run_in_fresh_thread(command.upgrade, cfg, "head")
-    assert {"robots", "runs"} <= _table_names(migrated_database)
+    assert {
+        "robots",
+        "runs",
+        "events",
+        "incidents",
+        "telemetry_samples",
+        "topic_samples",
+        "topic_states",
+        "node_states",
+    } <= _table_names(migrated_database)

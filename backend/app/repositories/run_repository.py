@@ -69,15 +69,17 @@ class RunRepository:
         await self.session.flush()
         return run
 
-    async def list_for_robot(
+    async def list_runs(
         self,
-        robot_id: str,
+        robot_id: str | None,
         limit: int,
         before: tuple[datetime, uuid.UUID] | None = None,
     ) -> list[Run]:
         """Newest first. Keyset pagination on (started_at, id), served by
-        ix_runs_robot_id_started_at."""
-        stmt = select(Run).where(Run.robot_id == robot_id)
+        ix_runs_robot_id_started_at (per robot) or ix_runs_started_at (all)."""
+        stmt = select(Run)
+        if robot_id is not None:
+            stmt = stmt.where(Run.robot_id == robot_id)
         if before is not None:
             started_at, run_id = before
             stmt = stmt.where(

@@ -1,10 +1,12 @@
 import uuid
+from datetime import datetime
 
-from sqlalchemy import func, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import Robot
+from app.domain.enums import RobotStatus
 
 
 class RobotRepository:
@@ -51,3 +53,23 @@ class RobotRepository:
             .execution_options(populate_existing=True)
         )
         return (await self.session.scalars(stmt)).one_or_none()
+
+    async def list_all(self) -> list[Robot]:
+        return list(await self.session.scalars(select(Robot).order_by(Robot.id)))
+
+    async def stale_not_offline(self, cutoff: datetime) -> list[str]:
+        """Robots the server still considers up whose last contact is older than cutoff."""
+        stmt = select(Robot.id).where(
+            Robot.status != RobotStatus.OFFLINE,
+            or_(Robot.last_seen_at.is_(None), Robot.last_seen_at < cutoff),
+        )
+        return list(await self.session.scalars(stmt))
+
+    async def offline_with_current_run(self, cutoff: datetime) -> list[str]:
+        """OFFLINE robots still pointing at a run, silent since before cutoff."""
+        stmt = select(Robot.id).where(
+            Robot.status == RobotStatus.OFFLINE,
+            Robot.current_run_id.is_not(None),
+            or_(Robot.last_seen_at.is_(None), Robot.last_seen_at < cutoff),
+        )
+        return list(await self.session.scalars(stmt))

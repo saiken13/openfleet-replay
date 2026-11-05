@@ -8,7 +8,7 @@ from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from sqlalchemy import delete, func, select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from app.db.models import Robot, Run
@@ -17,6 +17,7 @@ from app.domain.errors import ConflictError
 from app.repositories.robot_repository import RobotRepository
 from app.services.robot_service import RobotService
 from app.services.run_service import RunService
+from tests.conftest import purge_robots
 
 PREFIX = "concurrency-"
 T0 = datetime(2026, 11, 5, 12, 0, tzinfo=UTC)
@@ -29,9 +30,7 @@ async def sessions(engine: AsyncEngine) -> AsyncIterator[async_sessionmaker[Asyn
         yield maker
     finally:
         async with maker() as s:
-            await s.execute(delete(Run).where(Run.robot_id.startswith(PREFIX)))
-            await s.execute(delete(Robot).where(Robot.id.startswith(PREFIX)))
-            await s.commit()
+            await purge_robots(s, PREFIX)
 
 
 async def test_racing_first_registration_blocks_then_updates_instead_of_failing(

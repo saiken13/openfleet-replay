@@ -14,6 +14,7 @@ import os
 from collections.abc import AsyncIterator, Callable
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import asyncpg
@@ -21,12 +22,20 @@ import httpx
 import pytest
 from alembic.config import Config
 from sqlalchemy.engine import make_url
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 
 from alembic import command
+from app.api.deps import get_now
 from app.core.config import Settings
 from app.db.session import get_session
 from app.main import create_app
+from app.realtime.hub import Hub
+from app.workers.sweeper import Sweeper
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 
@@ -85,7 +94,7 @@ def migrated_database() -> str:
 
 @pytest.fixture
 def settings(migrated_database: str) -> Settings:
-    return Settings(database_url=migrated_database)
+    return Settings(database_url=migrated_database, sweeper_enabled=False)
 
 
 @pytest.fixture(scope="session")
@@ -109,11 +118,23 @@ async def db_session(engine: AsyncEngine) -> AsyncIterator[AsyncSession]:
             await outer.rollback()
 
 
+class Clock:
+    """Controllable server clock for API tests (overrides the `get_now` dependency)."""
+
+    def __init__(self, now: datetime | None = None) -> None:
+        self.now = now or datetime.now(UTC)
+
+    def advance(self, seconds: float) -> datetime:
+        self.now += timedelta(seconds=seconds)
+        return self.now
+
+
 @asynccontextmanager
 async def _client_for(
-    settings: Settings, session: AsyncSession | None = None
+    settings: Settings, session: AsyncSession | None = None, clock: Clock | None = None
 ) -> AsyncIterator[httpx.AsyncClient]:
-    """An HTTP client bound to a fresh app instance, with its lifespan running."""
+    """An HTTP client bound to a fresh app instance, with its lifespan running.
+    The app is reachable as `client.app` (for its hub)."""
     app = create_app(settings)
     if session is not None:
 
@@ -121,9 +142,12 @@ async def _client_for(
             yield session
 
         app.dependency_overrides[get_session] = _override
+    if clock is not None:
+        app.dependency_overrides[get_now] = lambda: clock.now
     async with app.router.lifespan_context(app):
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            client.app = app  # type: ignore[attr-defined]
             yield client
 
 
@@ -133,6 +157,45 @@ def make_client() -> ClientFactory:
 
 
 @pytest.fixture
-async def client(settings: Settings, db_session: AsyncSession) -> AsyncIterator[httpx.AsyncClient]:
-    async with _client_for(settings, db_session) as c:
+def clock() -> Clock:
+    return Clock()
+
+
+@pytest.fixture
+async def client(
+    settings: Settings, db_session: AsyncSession, clock: Clock
+) -> AsyncIterator[httpx.AsyncClient]:
+    async with _client_for(settings, db_session, clock) as c:
         yield c
+
+
+@pytest.fixture
+def sweeper(db_session: AsyncSession, settings: Settings) -> Sweeper:
+    """A sweeper whose sessions join the test transaction (so it sees test data and
+    everything still rolls back). Call `await sweeper.tick(now)` explicitly."""
+    maker = async_sessionmaker(
+        bind=db_session.bind, join_transaction_mode="create_savepoint", expire_on_commit=False
+    )
+    return Sweeper(maker, Hub(), settings)
+
+
+async def purge_robots(session: AsyncSession, prefix: str) -> None:
+    """Delete every row belonging to robots whose id starts with `prefix` (children first).
+    For tests that must commit for real and so can't use the rolled-back `db_session`."""
+    from sqlalchemy import delete
+
+    from app.db.models import (
+        Event,
+        Incident,
+        NodeStateRow,
+        Robot,
+        Run,
+        TelemetrySample,
+        TopicSample,
+        TopicState,
+    )
+
+    for model in (Incident, Event, TopicSample, TelemetrySample, TopicState, NodeStateRow, Run):
+        await session.execute(delete(model).where(model.robot_id.startswith(prefix)))
+    await session.execute(delete(Robot).where(Robot.id.startswith(prefix)))
+    await session.commit()
