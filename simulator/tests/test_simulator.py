@@ -131,3 +131,23 @@ async def test_client_retries_5xx_but_not_4xx() -> None:
     api409 = FleetApi("http://api", transport=httpx.MockTransport(reject), backoff_s=0)
     with pytest.raises(ApiError, match="409"):
         await api409.register("r1", "R1", "m")
+
+
+async def test_cancellation_ends_open_runs_as_aborted() -> None:
+    """SIGTERM / Ctrl-C cancel the task: runs must be ended, not left for the sweeper."""
+    import asyncio
+
+    fake = FakeApi()
+    api = FleetApi("http://api", transport=httpx.MockTransport(fake), backoff_s=0)
+    sc = Scenario.model_validate({"name": "t", "duration_s": 60, "fleet": {"count": 2}})
+
+    task = asyncio.create_task(run_scenario(api, sc, speed=1.0))  # real time: ~60s
+    await asyncio.sleep(0.2)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    ends = [(p, b) for m, p, b in fake.calls if p.endswith("/end")]
+    assert len(ends) == 2
+    assert {b["status"] for _, b in ends} == {"ABORTED"}
+    assert any(p.endswith("/telemetry") for _, p, _ in fake.calls)

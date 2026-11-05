@@ -10,6 +10,7 @@ import asyncio
 import json
 import logging
 import os
+import signal
 import sys
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -49,18 +50,29 @@ async def run_scenario(
     ticks = int(sc.duration_s / sc.tick_s)
     loop = asyncio.get_running_loop()
     start_wall = loop.time()
-    for i in range(ticks):
-        t = i * sc.tick_s
-        # Robot clock: real wall time in real-time mode (as a real robot would report);
-        # synthetic, evenly spaced time in --fast mode.
-        ts = t0 + timedelta(seconds=t) if fast else datetime.now(UTC)
-        batches = [(r, r.step(t, ts)) for r in robots]
+    try:
+        for i in range(ticks):
+            t = i * sc.tick_s
+            # Robot clock: real wall time in real-time mode (as a real robot would report);
+            # synthetic, evenly spaced time in --fast mode.
+            ts = t0 + timedelta(seconds=t) if fast else datetime.now(UTC)
+            batches = [(r, r.step(t, ts)) for r in robots]
+            await asyncio.gather(
+                *(api.telemetry(runs[r.robot_id], b) for r, b in batches if b is not None)
+            )
+            if not fast:
+                target = start_wall + (i + 1) * sc.tick_s / speed
+                await asyncio.sleep(max(0.0, target - loop.time()))
+    except asyncio.CancelledError:
+        # Graceful shutdown (SIGTERM from `docker compose stop`, Ctrl-C): tell the server the
+        # runs ended, instead of leaving them to be aborted as "abandoned" 60s later.
+        log.info("shutting down: ending %d runs as ABORTED", len(runs))
+        ended_at = datetime.now(UTC).isoformat()
         await asyncio.gather(
-            *(api.telemetry(runs[r.robot_id], b) for r, b in batches if b is not None)
+            *(api.end_run(run_id, "ABORTED", ended_at) for run_id in runs.values()),
+            return_exceptions=True,
         )
-        if not fast:
-            target = start_wall + (i + 1) * sc.tick_s / speed
-            await asyncio.sleep(max(0.0, target - loop.time()))
+        raise
 
     end_t = ticks * sc.tick_s
     ended_at = (t0 + timedelta(seconds=end_t) if fast else datetime.now(UTC)).isoformat()
@@ -96,6 +108,13 @@ async def amain(args: argparse.Namespace) -> int:
     if args.duration:
         sc.duration_s = args.duration
     api = FleetApi(args.api)
+    # `docker compose stop` sends SIGTERM. As PID 1 with no handler, Python would ignore it
+    # and Docker would SIGKILL us after the grace period (exit 137), leaving runs RUNNING.
+    loop = asyncio.get_running_loop()
+    task = asyncio.current_task()
+    assert task is not None
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(sig, task.cancel)
     try:
         await api.wait_until_healthy()
         all_runs: list[dict[str, Any]] = []
@@ -115,6 +134,9 @@ async def amain(args: argparse.Namespace) -> int:
     except ApiError as exc:
         log.error("%s", exc)
         return 2
+    except asyncio.CancelledError:
+        log.info("stopped")
+        return 0
     finally:
         await api.close()
 

@@ -67,6 +67,12 @@ None open. Fixed bugs are recorded in docs/BUGS.md.
 docker compose --profile demo up --build      # dashboard http://localhost:8080
 ```
 
+## Diagnosing a live system
+```bash
+docker compose exec -T postgres psql -U openfleet -d openfleet -q < scripts/integrity_checks.sql   # 24 invariants, 0 = OK
+docker compose logs backend | grep -iE "error|traceback|sweeper"
+```
+
 ## How to run tests
 ```bash
 docker compose up -d postgres

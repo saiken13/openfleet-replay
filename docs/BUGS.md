@@ -50,3 +50,15 @@ Files changed: simulator/openfleet_sim/main.py, simulator/openfleet_sim/robot.py
 Tests added: simulator tests now pass timestamps explicitly.
 How regression is prevented: `SimRobot.step(t, ts)` makes the clock an explicit input.
 Date: 2026-11-05
+
+
+### BUG-004 — Stopping the simulator left runs dangling (false "robot stopped reporting" incidents)
+Bug: every run started by the simulator container ended ABORTED/"abandoned", with a CRITICAL `heartbeat_missing` incident on every robot.
+Symptoms: found by a live-data diagnostic — 8 runs aborted by the sweeper; simulator container `Exited (137)`.
+Root cause: the simulator runs as PID 1 in its container without a SIGTERM handler, so it ignored `docker compose stop`; Docker SIGKILLed it and its runs were never ended. The backend behaved correctly: robots went silent mid-run, so it raised `heartbeat_missing` and the sweeper aborted the runs after `RUN_ABANDON_AFTER_S`.
+How we diagnosed it: integrity checks all passed (backend consistent) → runs list showed only container-started runs were abandoned → container exit code 137 (not OOM) → reproduced with `docker compose stop simulator` (exit 137, 4 runs left RUNNING).
+Fix: SIGTERM/SIGINT cancel the main task; the scenario ends its open runs as ABORTED (reported by the robot) before exiting 0.
+Files changed: simulator/openfleet_sim/main.py
+Tests added: `test_cancellation_ends_open_runs_as_aborted`; verified in Docker (exit 0 in ~1s, runs ABORTED "reported by robot", no incidents).
+How regression is prevented: the test; `scripts/integrity_checks.sql` for live diagnostics.
+Date: 2026-11-05
