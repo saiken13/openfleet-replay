@@ -1,0 +1,12 @@
+{
+  "name": "openfleet-replay",
+  "private": true,
+  "description": "Convenience scripts so the dashboard can be run from the repo root. The frontend lives in frontend/.",
+  "scripts": {
+    "postinstall": "npm --prefix frontend install --no-audit --no-fund",
+    "dev": "npm --prefix frontend run dev",
+    "build": "npm --prefix frontend run build",
+    "test": "npm --prefix frontend test",
+    "typecheck": "npm --prefix frontend run typecheck"
+  }
+}

@@ -114,10 +114,9 @@ python3.12 -m venv .venv && .venv/bin/pip install -e ".[dev]"
 .venv/bin/openfleet-sim -s scenarios/demo.yaml --speed 4  # compressed
 .venv/bin/pytest
 
-# Frontend (Node 22+)
-cd frontend
-npm install
-npm run dev        # http://localhost:5173, proxies /api to localhost:8000
+# Frontend (Node 22+) — from the repo root (or `cd frontend` and use the same commands)
+npm install        # installs frontend/ dependencies
+npm run dev        # http://localhost:5173, proxies /api to localhost:8000 (backend must be running)
 npm test && npm run typecheck
 ```
 
