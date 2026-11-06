@@ -4,6 +4,8 @@ import type {
   IncidentStatus,
   IncidentTimeline,
   NodeStateRow,
+  RedetectOverrides,
+  RedetectResult,
   Robot,
   Run,
   RunComparison,
@@ -80,6 +82,8 @@ export const api = {
   runSummary: (id: string) => request<RunSummary>(`/runs/${id}/summary`),
   runStream: (id: string, cursor?: string | null, limit = 2000) =>
     request<RunStream>(`/runs/${id}/stream${qs({ cursor, limit })}`),
+  redetect: (id: string, overrides: RedetectOverrides = {}) =>
+    request<RedetectResult>(`/runs/${id}/redetect`, { method: "POST", body: JSON.stringify(overrides) }),
   compare: (base: string, candidate: string) =>
     request<RunComparison>(`/runs/compare${qs({ base, candidate })}`),
 

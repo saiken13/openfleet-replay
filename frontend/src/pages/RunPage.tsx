@@ -3,6 +3,7 @@ import { Link, useParams, useSearchParams } from "react-router-dom";
 import { api, fetchWholeStream } from "../api/client";
 import type { RunSummary } from "../api/types";
 import { Badge, RunStatusBadge, SeverityBadge, StatusBadge } from "../components/Badges";
+import { RedetectPanel } from "../components/RedetectPanel";
 import { RobotView } from "../components/RobotView";
 import { fmtDateTime, fmtDuration, fmtNum, fmtPct, fmtTime, shortId } from "../lib/format";
 import { ReplayClock } from "../replay/ReplayClock";
@@ -140,6 +141,14 @@ export function RunPage() {
       <RobotView state={state} live={false} />
 
       {summary && <SummaryPanel s={summary} />}
+
+      <RedetectPanel
+        runId={runId}
+        onSeek={(iso) => {
+          c?.seek(Math.max(0, Date.parse(iso) - c.t0 - 5000));
+          window.scrollTo({ top: 0, behavior: "smooth" });
+        }}
+      />
     </div>
   );
 }

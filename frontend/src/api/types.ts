@@ -191,3 +191,64 @@ export interface RunComparison {
   incidents_delta: Record<Severity, number>;
   notes: string[];
 }
+
+/** Re-detection replay (DECISIONS #023). Thresholds by name, as in the server settings. */
+export const REDETECT_THRESHOLDS = [
+  "heartbeat_timeout_s",
+  "topic_degraded_ratio",
+  "topic_failed_ratio",
+  "topic_stale_after_s",
+  "cpu_high_pct",
+  "mem_high_pct",
+  "battery_low_pct",
+  "battery_critical_pct",
+  "incident_resolve_after_s",
+] as const;
+export type RedetectThreshold = (typeof REDETECT_THRESHOLDS)[number];
+export type RedetectOverrides = Partial<Record<RedetectThreshold, number>>;
+
+export type RedetectVerdict = "both" | "replay_only" | "recorded_only";
+
+export interface RedetectIncident {
+  rule: string;
+  dedup_key: string;
+  severity: Severity;
+  initial_severity: Severity;
+  title: string;
+  description: string;
+  evidence: Record<string, unknown>;
+  opened_at: string; // robot time
+  opened_offset_s: number;
+  last_detected_at: string;
+  escalated_at: string | null;
+  resolved_at: string | null;
+  resolve_reason: string | null;
+  detections: number;
+  recorded_incident_id: string | null;
+}
+
+export interface RedetectKey {
+  dedup_key: string;
+  rule: string;
+  verdict: RedetectVerdict;
+  recorded_count: number;
+  replayed_count: number;
+  recorded_severity: Severity | null;
+  replayed_severity: Severity | null;
+  first_recorded_offset_s: number | null;
+  first_replayed_offset_s: number | null;
+}
+
+export interface RedetectResult {
+  run: Run;
+  config: Record<RedetectThreshold, number>;
+  overrides: RedetectOverrides;
+  batches: number;
+  incidents: RedetectIncident[];
+  recorded: Incident[];
+  keys: RedetectKey[];
+  caught: number;
+  missed: number;
+  new: number;
+  notes: string[];
+}

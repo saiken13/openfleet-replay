@@ -14,6 +14,7 @@ const TONES: Record<string, Tone> = {
   DEGRADED: "amber", WARNING: "amber", INVESTIGATING: "amber",
   ERROR: "red", FAILED: "red", CRITICAL: "red", STOPPED: "red", OPEN: "red",
   OFFLINE: "slate", UNKNOWN: "slate", ABORTED: "slate", INFO: "cyan",
+  CAUGHT: "green", NEW: "amber", MISSED: "red", // re-detection verdicts
 };
 
 export function Badge({ value, className = "" }: { value: string; className?: string }) {
