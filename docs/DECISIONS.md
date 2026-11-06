@@ -174,3 +174,31 @@ Both showed up in the first end-to-end demo.
 **Why:** While a robot is offline we can't observe that a problem cleared, so silence must not read as recovery. Robots that are switched off at the end of a shift shouldn't page anyone.
 **Tradeoffs:** A robot that dies mid-run and never returns keeps an open incident until someone resolves it by hand. That's intentional.
 **Date:** 2026-11-05
+
+## 020 — ROS 2 collector: raw best-effort subscriptions, one run per collector process, self-healing uplink
+**Status:** Accepted (2026-11-06)
+**Decision:**
+- **Measuring topics:** the collector (`collector/`) subscribes to each configured topic in **raw mode** (no deserialization) with **BEST_EFFORT** QoS, and counts arrivals in a sliding window.
+  - BEST_EFFORT subscribers match both reliable and best-effort publishers, so a QoS mismatch can never hide a topic.
+  - Topic types are discovered from the ROS graph, so no message packages need configuring.
+  - A configured topic that never appears is reported at 0 Hz (FAILED) after a startup grace period (BUG-005).
+- **Node liveness:** a node's presence in the ROS graph. A missing node is STOPPED.
+- **Runs:** each collector process opens one run and ends it SUCCESS on SIGINT/SIGTERM.
+- **Uplink:** a bounded, ordered buffer.
+  - Retries reuse the same `seq`, so server-side dedup makes them safe.
+  - A 409 (run aborted during a long outage) or 404 (server data reset) starts a new run.
+  - Other 4xx responses drop the batch.
+- **Pure core:** the ROS-specific part is a thin node. Rate tracking, batch building and the uplink are ROS-independent and unit-tested without ROS.
+**Why:**
+- The collector must never make a robot worse. Counting raw arrivals is cheap, and it never blocks the robot's own executor, because it runs its own process.
+- Monitoring must survive network loss, which is normal for mobile robots.
+- One run per process maps naturally to "the robot software was started".
+**Alternatives considered:**
+- `ros2 topic hz`-style deserializing subscribers: CPU cost on high-rate topics such as images.
+- A C++ collector: faster, but much harder to ship and test. Python is fast enough at aggregate rates.
+- Run boundaries driven by a mission/task API: robot-specific, so it's left for later.
+**Tradeoffs:**
+- A BEST_EFFORT subscription can under-count on a lossy network. The collector runs on the robot, so that isn't a practical issue.
+- /rosout lines logged in the first moment after a node starts can be missed before discovery completes.
+- The node graph shows presence, not health. A node that is alive but wedged shows up as a stale topic rate instead.
+**Date:** 2026-11-06

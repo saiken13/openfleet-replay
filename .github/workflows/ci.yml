@@ -72,6 +72,38 @@ jobs:
       - run: npm test
       - run: npm run build
 
+  collector:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ["3.10", "3.12"]  # ROS 2 Humble / Jazzy system Pythons
+    defaults:
+      run:
+        working-directory: collector
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: pip install -e ".[dev]"
+      - run: ruff check .
+      - run: ruff format --check .
+      - run: pytest -v
+
+  # Real ROS 2 Jazzy: a fake robot publishing /scan + the collector + the backend.
+  ros2-collector-e2e:
+    runs-on: ubuntu-latest
+    needs: [backend, collector]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install httpx
+      - run: python collector/ros_test/e2e.py
+      - if: failure()
+        run: docker compose --profile ros logs ros-collector ros-robot backend
+
   # The product's own story, as a gate: a healthy run must pass the regression config,
   # and the scripted LiDAR regression must FAIL it (exit code 1).
   e2e-regression-check:

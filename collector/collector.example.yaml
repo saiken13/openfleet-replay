@@ -1,0 +1,20 @@
+# openfleet-collector configuration. Copy and edit for your robot.
+api_url: http://localhost:8000
+robot_id: ros-bot-01
+robot_name: ROS Bot 01
+robot_model: TurtleBot4
+software_version: "1.0.0"     # your robot software's version; shows up on runs and incidents
+
+window_s: 1.0                 # aggregation window = one batch per second
+
+topics:                       # topic: expected Hz (null = just measure it)
+  /scan: 15
+  /odom: 50
+  /tf: null
+
+nodes:                        # nodes that must be alive (`ros2 node list`)
+  - lidar_driver
+  - controller_server
+
+battery_topic: /battery_state # sensor_msgs/BatteryState (optional)
+forward_log_level: WARN       # /rosout lines at or above this level become OpenFleet events

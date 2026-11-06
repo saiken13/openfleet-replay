@@ -51,5 +51,27 @@ services:
       backend:
         condition: service_healthy
 
+  # ROS 2 collector integration test: a fake robot (ROS 2 Jazzy) + the real collector.
+  # Opt in:  docker compose --profile ros up
+  ros-robot:
+    build: ./collector
+    profiles: [ros]
+    command: ["python3", "ros_test/fake_robot.py"]
+    environment:
+      ROS_DOMAIN_ID: "42"
+    volumes:
+      - rosctl:/tmp
+
+  ros-collector:
+    build: ./collector
+    profiles: [ros]
+    command: ["openfleet-collector", "--config", "ros_test/collector.test.yaml"]
+    environment:
+      ROS_DOMAIN_ID: "42"
+    depends_on:
+      backend:
+        condition: service_healthy
+
 volumes:
   pgdata:
+  rosctl:

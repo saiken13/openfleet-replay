@@ -26,6 +26,11 @@ OpenFleet Replay collects robot telemetry and tracks the health of ROS topics an
 - **Compare and check:**
   - Diff two runs in the UI.
   - Or gate CI with `openfleet check RUN --config regression.yaml [--baseline RUN]`, which exits 1 on regression.
+- **ROS 2 collector:** runs on the robot.
+  - Measures every configured topic's real rate (raw, best-effort subscriptions, with message types auto-discovered).
+  - Watches nodes in the ROS graph, forwards `/rosout` warnings, and reports battery, CPU and memory.
+  - Keeps buffering through network outages without losing data.
+  - Tested end to end on ROS 2 Jazzy in CI.
 - **Simulator:** no robot required. Seeded YAML scenarios script failures, so every demo is reproducible.
 
 ## Quick start
@@ -52,6 +57,23 @@ Open the dashboard, click an incident, then **Replay from 15s before ▶**.
 Without `--profile demo` you get the platform with an empty fleet. Run the simulator yourself (see below).
 
 Postgres is published on host port **5433** (not 5432), so it doesn't clash with a locally installed Postgres. Override it with `OPENFLEET_PG_HOST_PORT`.
+
+## Connect a real ROS 2 robot
+
+On the robot, inside its ROS 2 environment (Humble or Jazzy):
+
+```bash
+source /opt/ros/jazzy/setup.bash
+python3 -m venv --system-site-packages ~/openfleet && ~/openfleet/bin/pip install ./collector
+cp collector/collector.example.yaml collector.yaml   # set api_url, robot_id, topics + expected Hz, nodes
+~/openfleet/bin/openfleet-collector --config collector.yaml
+```
+
+It's also available as a Docker image (`collector/Dockerfile`, based on `ros:jazzy-ros-base`). To watch it work against a fake robot (a real ROS 2 node publishing `/scan`), run:
+
+```bash
+python collector/ros_test/e2e.py   # scripts a degradation, a stop, a node crash and a backend outage, and asserts each
+```
 
 ## Regression gate in CI
 
@@ -127,6 +149,7 @@ npm test && npm run typecheck
 | `backend/app/` | FastAPI app: `api/` (routers), `services/`, `repositories/` (SQL), `detection/` (pure rules), `realtime/` (hub), `workers/` (sweeper) |
 | `backend/openfleet_cli/` | `openfleet check` regression CLI (thin HTTP client) |
 | `backend/alembic/` | Migrations (CI runs `alembic check` so models and migrations can't drift) |
+| `collector/` | ROS 2 collector (runs on the robot) + ROS 2 end-to-end test |
 | `simulator/` | Simulated robots + YAML failure scenarios (public API only) |
 | `frontend/` | React + TypeScript + Vite + Tailwind dashboard |
 | `examples/` | Example regression config |
@@ -135,7 +158,6 @@ npm test && npm run typecheck
 ## Status and limits
 
 This is an MVP. It's single-process by design. The known scaling limits and their evolution paths are listed in [ARCHITECTURE §10](docs/ARCHITECTURE.md). These aren't built yet:
-- the ROS 2 collector (the simulator speaks the same API)
 - authentication
 - re-detection replay
 - rosbag/MCAP recordings

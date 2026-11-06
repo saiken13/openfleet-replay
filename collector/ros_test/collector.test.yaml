@@ -1,0 +1,11 @@
+api_url: http://backend:8000
+robot_id: ros-test-01
+robot_name: ROS Test Robot
+robot_model: Jazzy container
+software_version: "0.1.0-test"
+topics:
+  /scan: 15
+  /never_published: 10
+nodes: [lidar_driver]
+battery_topic: /battery_state
+forward_log_level: WARN

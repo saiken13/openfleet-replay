@@ -62,3 +62,14 @@ Files changed: simulator/openfleet_sim/main.py
 Tests added: `test_cancellation_ends_open_runs_as_aborted`; verified in Docker (exit 0 in ~1s, runs ABORTED "reported by robot", no incidents).
 How regression is prevented: the test; `scripts/integrity_checks.sql` for live diagnostics.
 Date: 2026-11-05
+
+### BUG-005 — Collector raised a false CRITICAL incident on every start
+Bug: on every collector start, each monitored topic was reported at 0 Hz for the first batch, so OpenFleet opened a CRITICAL "stopped" incident. Because incidents only escalate (never de-escalate), a real degradation seconds later was then hidden inside that CRITICAL incident.
+Symptoms: the ROS 2 end-to-end test expected a WARNING incident when /scan dropped to 4 Hz and found only an (already open) CRITICAL one.
+Root cause: the first window after subscribing was partial (and before discovery there was no subscription at all), so the measured rate was 0. The same race applies to nodes not yet visible in the ROS graph.
+How we diagnosed it: the event trail showed `incident_opened: /scan stopped` at the run's first second, followed one second later by `/scan FAILED → HEALTHY`.
+Fix: a topic is reported only after one full window since it was subscribed; undiscovered topics and nodes are reported missing only after `startup_grace_s` (default 5 s).
+Files changed: collector/openfleet_collector/rates.py, batch.py, node.py, config.py
+Tests added: `test_startup_grace_no_false_failures`, `test_node_states_hides_missing_nodes_during_grace`; the ROS 2 e2e test asserts the WARNING → CRITICAL sequence.
+How regression is prevented: those tests (unit + ros2-collector-e2e in CI).
+Date: 2026-11-06

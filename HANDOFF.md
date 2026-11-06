@@ -7,6 +7,8 @@
 - **Latest commit:** see `git log -1`
 
 ## Current state
+**ROS 2 collector done (2026-11-06).** `collector/` runs on real ROS 2 and is verified end to end on Jazzy in CI. Earlier summary below.
+
 **The MVP is complete.** Everything in the README's "What it does" section is implemented, tested, and checked end to end with the real stack:
 - Docker Compose: Postgres + backend + nginx frontend + simulator
 - Screenshots taken of the fleet, incident and replay pages
@@ -36,8 +38,7 @@ CI has four jobs: backend, simulator, frontend, and `e2e-regression-check`.
 ## Currently working
 Nothing in progress.
 
-## Not built yet (deliberately out of MVP scope)
-- **ROS 2 collector:** a `rclpy` node that measures topic Hz and node state and posts batches. The API contract is the simulator's.
+## Not built yet
 - **Re-detection replay:** run current rules over a recorded run's snapshots.
 - **Authentication and multi-tenant support.**
 - **rosbag2/MCAP storage:** object storage.
@@ -81,10 +82,15 @@ docker compose up -d postgres
 (cd frontend && npm test && npm run typecheck)
 ```
 
+## Collector notes
+- **Code:** `collector/openfleet_collector/`. `rates.py`, `batch.py` and `uplink.py` are pure and unit-tested without ROS. `node.py` is the thin rclpy glue.
+- **ROS 2 e2e:** `python collector/ros_test/e2e.py` (Docker, `--profile ros`, ROS_DOMAIN_ID 42). It needs the backend on localhost:8000.
+- **Startup grace:** 5 s (BUG-005). Topics are reported only after one full window since they were subscribed.
+- **Known limitation:** `/rosout` lines logged right after a node starts can be missed before discovery completes.
+
 ## Recommended next task
-**ROS 2 collector** (`collector/`):
-1. An `rclpy` node with a configurable topic list and expected rates.
-2. Measure Hz and last-message age per topic over a 1 s window, and node liveness via the ROS graph.
-3. POST the same `TelemetryBatch` the simulator sends.
-4. Reuse the simulator's `FleetApi` retry semantics.
-5. Test it in a ROS 2 Humble/Jazzy container in CI.
+**Authentication.**
+1. Per-robot API keys for the write endpoints (registration, runs, telemetry, heartbeat). Store them hashed, and let the collector and simulator send them in a header.
+2. User login for the dashboard and read APIs, with viewer/operator roles (operators can triage incidents).
+3. WebSocket auth.
+4. Keep `docker compose --profile demo` working with zero setup (seeded demo keys).

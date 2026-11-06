@@ -9,7 +9,7 @@
 flowchart LR
     subgraph Edge["Robot side"]
         SIM["Simulator<br/>(MVP)"]
-        ROS["ROS 2 Collector<br/>(Phase 2)"]
+        ROS["ROS 2 Collector<br/>(collector/)"]
     end
 
     subgraph Backend["FastAPI backend — one process (modular monolith)"]
@@ -46,6 +46,7 @@ The backend stores those summaries. It decides whether something is unhealthy an
 | Component | Responsibility | Must NOT |
 |---|---|---|
 | **Simulator** (`simulator/`) | Simulates N robots: registration, heartbeats, runs, metrics, topic rates, node states, logs. Runs scripted failure **scenarios** (YAML) with a seeded RNG so failures are reproducible. It is the reference client for the API. | Import backend code. It may only use the public HTTP API. |
+| **ROS 2 collector** (`collector/`) | On the robot. Raw best-effort subscriptions count topic arrivals in a sliding window. Node liveness comes from the ROS graph, logs from `/rosout` (WARN+), battery from `BatteryState`, and CPU/memory from psutil. It POSTs the same `TelemetryBatch` as the simulator. Its uplink buffers through outages and self-heals runs (DECISIONS #020). | Deserialize messages or run inside the robot's own process. |
 | **API routers** (`backend/app/api/`) | HTTP/WS boundary: parse and validate input with Pydantic, call a service, map domain errors to HTTP codes. | Contain business rules or SQL. |
 | **Services** (`backend/app/services/`) | Use-case logic: "ingest a batch", "process a heartbeat", "open/resolve incidents". They own transaction boundaries and call the detection engine and realtime hub. | Know about HTTP. |
 | **Repositories** (`backend/app/repositories/`) | All SQL for one aggregate (robots, runs, telemetry, events, incidents). Return ORM or domain objects. | Make business decisions. |
