@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { wsUrl } from "../api/client";
+import { api, wsUrl } from "../api/client";
 import type { ServerMessage } from "../api/types";
 
 export type SocketState = "connecting" | "open" | "closed";
@@ -43,6 +43,9 @@ export function useLiveSocket(
       ws.onclose = () => {
         setState("closed");
         if (stopped) return;
+        // Browsers hide why a handshake was refused; if the session ended, this 401s and
+        // the app returns to the login page (lib/auth.ts).
+        api.auth.me().catch(() => {});
         const delay = Math.min(10_000, 500 * 2 ** attempt++);
         retry = window.setTimeout(connect, delay);
       };

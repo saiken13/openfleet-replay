@@ -15,6 +15,8 @@ import type {
   TopicState,
 } from "./types";
 
+import { CLIENT_HEADER, notifyUnauthorized, type User } from "../lib/auth";
+
 const BASE = "/api/v1";
 
 export class ApiError extends Error {
@@ -29,8 +31,11 @@ export class ApiError extends Error {
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const resp = await fetch(BASE + path, {
     ...init,
-    headers: { "content-type": "application/json", ...(init?.headers ?? {}) },
+    credentials: "same-origin", // the HttpOnly session cookie
+    headers: { "content-type": "application/json", [CLIENT_HEADER]: "dashboard", ...(init?.headers ?? {}) },
   });
+  // A wrong password is just a failed login; any other 401 means the session is gone.
+  if (resp.status === 401 && path !== "/auth/login") notifyUnauthorized();
   if (!resp.ok) {
     let detail = resp.statusText;
     try {
@@ -41,6 +46,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     }
     throw new ApiError(resp.status, detail);
   }
+  if (resp.status === 204) return undefined as T;
   return (await resp.json()) as T;
 }
 
@@ -50,6 +56,14 @@ function qs(params: Record<string, string | number | undefined | null>): string 
 }
 
 export const api = {
+  auth: {
+    config: () => request<{ login_hint: string | null }>("/auth/config"),
+    me: () => request<User>("/auth/me"),
+    login: (username: string, password: string) =>
+      request<User>("/auth/login", { method: "POST", body: JSON.stringify({ username, password }) }),
+    logout: () => request<void>("/auth/logout", { method: "POST" }),
+  },
+
   robots: () => request<Robot[]>("/robots"),
   robot: (id: string) => request<Robot>(`/robots/${id}`),
   topics: (id: string) => request<TopicState[]>(`/robots/${id}/topics`),

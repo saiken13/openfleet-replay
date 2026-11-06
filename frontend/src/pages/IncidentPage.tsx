@@ -2,9 +2,11 @@ import { useCallback, useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { api } from "../api/client";
 import type { IncidentTimeline } from "../api/types";
+import { useAuth } from "../auth/AuthContext";
 import { Badge, SeverityBadge } from "../components/Badges";
 import { LineChart } from "../components/LineChart";
 import { EventList } from "../components/RobotView";
+import { canTriage } from "../lib/auth";
 import { fmtDateTime, fmtDuration } from "../lib/format";
 
 const PALETTE = ["#22d3ee", "#a78bfa", "#34d399", "#fbbf24", "#f472b6", "#60a5fa"];
@@ -14,6 +16,8 @@ export function IncidentPage() {
   const [tl, setTl] = useState<IncidentTimeline | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const { user } = useAuth();
+  const operator = canTriage(user);
 
   const load = useCallback(() => api.timeline(incidentId).then(setTl, (e) => setError(String(e))), [incidentId]);
   useEffect(() => void load(), [load]);
@@ -66,11 +70,16 @@ export function IncidentPage() {
         <h1 className="text-xl font-semibold">{inc.title}</h1>
         <Badge value={inc.status} />
         <div className="ml-auto flex gap-2">
-          {inc.status === "OPEN" && (
+          {operator && inc.status === "OPEN" && (
             <button className="btn" disabled={busy} onClick={() => setStatus("INVESTIGATING")}>Investigate</button>
           )}
-          {inc.status !== "RESOLVED" && (
+          {operator && inc.status !== "RESOLVED" && (
             <button className="btn" disabled={busy} onClick={() => setStatus("RESOLVED")}>Resolve</button>
+          )}
+          {!operator && inc.status !== "RESOLVED" && (
+            <span className="self-center text-xs text-slate-500" title="Triage needs the operator role">
+              View only
+            </span>
           )}
           {inc.run_id && (
             <Link

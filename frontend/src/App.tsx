@@ -1,5 +1,6 @@
 import { createContext, useContext, useEffect, useState } from "react";
 import { NavLink, Route, Routes } from "react-router-dom";
+import { useAuth } from "./auth/AuthContext";
 import type { SocketState } from "./hooks/useLiveSocket";
 import { ComparePage } from "./pages/ComparePage";
 import { FleetPage } from "./pages/FleetPage";
@@ -27,6 +28,21 @@ const NAV = [
   ["/compare", "Compare"],
 ] as const;
 
+function UserMenu() {
+  const { user, logout } = useAuth();
+  if (!user) return null;
+  return (
+    <span className="flex items-center gap-2 text-xs text-slate-400">
+      <span>
+        {user.username} <span className="text-slate-500">· {user.role.toLowerCase()}</span>
+      </span>
+      <button className="rounded px-2 py-1 text-slate-400 hover:bg-slate-800 hover:text-slate-200" onClick={() => void logout()}>
+        Sign out
+      </button>
+    </span>
+  );
+}
+
 export default function App() {
   const [conn, setConn] = useState<SocketState | null>(null);
   return (
@@ -51,14 +67,16 @@ export default function App() {
               </NavLink>
             ))}
           </nav>
+          <span className="ml-auto" />
           {conn && (
-            <span className="ml-auto flex items-center gap-1.5 text-xs text-slate-400">
+            <span className="flex items-center gap-1.5 text-xs text-slate-400">
               <span
                 className={`h-2 w-2 rounded-full ${conn === "open" ? "bg-emerald-400" : conn === "connecting" ? "bg-amber-400" : "bg-rose-500"}`}
               />
               {conn === "open" ? "live" : conn}
             </span>
           )}
+          <UserMenu />
         </div>
       </header>
       <main className="mx-auto max-w-7xl px-4 py-6">
