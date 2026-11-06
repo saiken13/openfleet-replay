@@ -1,8 +1,12 @@
-# Robot API keys (DECISIONS #021): this local stack seeds the PUBLIC demo keys in
-# examples/demo-robot-keys.json so the demo, CI and the ROS e2e need zero setup. Never use
-# them on a reachable deployment: drop OPENFLEET_ROBOT_KEYS_FILE and issue real keys with
+# Auth (DECISIONS #021, #022): this local stack seeds PUBLIC demo credentials so the demo,
+# CI and the ROS e2e need zero setup: robot keys (examples/demo-robot-keys.json) and users
+# operator/operator-demo + viewer/viewer-demo with a viewer API token
+# (examples/demo-users.json). Never use them on a reachable deployment: drop the
+# OPENFLEET_ROBOT_KEYS_FILE / OPENFLEET_USERS_FILE / OPENFLEET_LOGIN_HINT lines and run
 #   docker compose exec backend openfleet keys create ROBOT_ID
+#   docker compose exec backend openfleet users create NAME --role operator
 x-demo-keys: &demo-keys ./examples/demo-robot-keys.json:/etc/openfleet/demo-robot-keys.json:ro
+x-demo-users: &demo-users ./examples/demo-users.json:/etc/openfleet/demo-users.json:ro
 
 services:
   postgres:
@@ -21,18 +25,35 @@ services:
       timeout: 3s
       retries: 30
 
+  # Realtime fan-out between backend replicas (DECISIONS #025). Ephemeral: no volume.
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "${OPENFLEET_REDIS_HOST_PORT:-6380}:6379"  # 6380 on the host avoids clashing with a local Redis
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
   backend:
     build: ./backend
     environment:
       OPENFLEET_DATABASE_URL: postgresql+asyncpg://openfleet:openfleet@postgres:5432/openfleet
+      OPENFLEET_REDIS_URL: redis://redis:6379/0
       OPENFLEET_CORS_ORIGINS: '["http://localhost:5173", "http://localhost:8080"]'
       OPENFLEET_ROBOT_KEYS_FILE: /etc/openfleet/demo-robot-keys.json
+      OPENFLEET_USERS_FILE: /etc/openfleet/demo-users.json
+      OPENFLEET_LOGIN_HINT: "Demo: operator / operator-demo (can triage) or viewer / viewer-demo"
     volumes:
       - *demo-keys
+      - *demo-users
     ports:
       - "8000:8000"
     depends_on:
       postgres:
+        condition: service_healthy
+      redis:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/health', timeout=2)"]

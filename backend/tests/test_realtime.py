@@ -1,11 +1,14 @@
 import asyncio
 
 import httpx
+import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import func
+from starlette.websockets import WebSocketDisconnect
 
 from app.core.config import Settings
 from app.main import create_app
-from app.realtime.hub import FLEET, Hub, robot_channel
+from app.realtime.hub import FLEET, RESYNC, Hub, robot_channel
 from tests.helpers import batch, ingest, register, start_run
 
 
@@ -36,6 +39,24 @@ async def test_slow_subscriber_drops_oldest_and_never_blocks_publisher() -> None
             hub.publish(("a",), {"n": n})
         assert [m["n"] for m in drain(sub)] == [2, 3, 4]
         assert sub.dropped == 2
+
+
+async def test_publish_forwards_but_deliver_stays_local() -> None:
+    hub = Hub()
+    forwarded = []
+    hub.forward = lambda channels, message: forwarded.append((channels, message))
+    with hub.subscribe("a") as sub:
+        hub.publish(("a",), {"n": 1})
+        hub.deliver(("a",), {"n": 2})  # from another replica: must not bounce back out
+        assert drain(sub) == [{"n": 1}, {"n": 2}]
+    assert forwarded == [(("a",), {"n": 1})]
+
+
+async def test_resync_reaches_every_subscriber() -> None:
+    hub = Hub()
+    with hub.subscribe("a") as a, hub.subscribe("b") as b:
+        hub.resync()
+        assert drain(a)[0] is RESYNC and drain(b)[0] is RESYNC
 
 
 # --- services publish after commit ---------------------------------------------------------
@@ -79,10 +100,52 @@ async def test_failed_request_publishes_nothing(client: httpx.AsyncClient) -> No
 # --- websocket endpoint --------------------------------------------------------------------
 
 
-def test_websocket_delivers_hub_messages() -> None:
-    # No DB needed: the WS endpoint only talks to the hub.
-    app = create_app(Settings(sweeper_enabled=False))
-    with TestClient(app) as tc, tc.websocket_connect("/api/v1/ws/robots/robot-01") as ws:
+WS_USER = "concurrency-ws-viewer"
+WS_TOKEN = "ofu_concurrency-ws-viewer-token"
+
+
+def _db(url: str, fn) -> object:
+    """Run `fn(session)` against the real test DB and commit (TestClient runs the app on its
+    own event loop, so these tests can't share the rolled-back test transaction)."""
+    from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+
+    async def go() -> object:
+        engine = create_async_engine(url)
+        try:
+            async with AsyncSession(engine, expire_on_commit=False) as s:
+                result = await fn(s)
+                await s.commit()
+                return result
+        finally:
+            await engine.dispose()
+
+    return asyncio.run(go())
+
+
+@pytest.fixture
+def ws_app(migrated_database: str):
+    from app.services.user_service import UserService
+    from tests.conftest import purge_robots
+
+    _db(migrated_database, lambda s: purge_robots(s, "concurrency-ws-"))
+    spec = {WS_USER: {"password": "ws-viewer-password", "role": "viewer", "token": WS_TOKEN}}
+    _db(migrated_database, lambda s: UserService(s).seed(spec))
+    settings = Settings(
+        database_url=migrated_database, sweeper_enabled=False, ws_reauth_interval_s=0.05
+    )
+    yield create_app(settings)
+    _db(migrated_database, lambda s: purge_robots(s, "concurrency-ws-"))
+
+
+AUTH = {"Authorization": f"Bearer {WS_TOKEN}"}
+
+
+def test_websocket_delivers_hub_messages(ws_app) -> None:
+    app = ws_app
+    with (
+        TestClient(app) as tc,
+        tc.websocket_connect("/api/v1/ws/robots/robot-01", headers=AUTH) as ws,
+    ):
         assert ws.receive_json() == {"type": "hello", "channel": "robot:robot-01"}
 
         async def publish() -> None:
@@ -98,3 +161,65 @@ def test_websocket_delivers_hub_messages() -> None:
 
     with TestClient(app) as tc:
         assert tc.portal.call(count) == 0
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        {},
+        {"Authorization": "Bearer not-a-token-at-all"},
+        {"Authorization": "Bearer ofk_demo_amr-01_public-not-secret"},  # robot key: not a user
+        {"Cookie": f"openfleet_session={WS_TOKEN}", "Origin": "http://evil.example"},
+    ],
+)
+def test_websocket_refuses_unauthenticated_handshakes(ws_app, headers: dict) -> None:
+    with TestClient(ws_app) as tc:
+        with pytest.raises(WebSocketDisconnect) as exc:
+            with tc.websocket_connect("/api/v1/ws/fleet", headers=headers):
+                pass
+        assert exc.value.code == 1008
+        assert ws_app.state.hub.subscriber_count(FLEET) == 0
+
+
+@pytest.mark.parametrize("origin", ["http://testserver", "http://localhost:5173", None])
+def test_websocket_accepts_session_cookie_from_allowed_origins(ws_app, origin) -> None:
+    headers = {"Cookie": f"openfleet_session={WS_TOKEN}"}
+    if origin:
+        headers["Origin"] = origin
+    with TestClient(ws_app) as tc, tc.websocket_connect("/api/v1/ws/fleet", headers=headers) as ws:
+        assert ws.receive_json()["type"] == "hello"
+
+
+def test_open_websocket_closes_when_its_token_is_revoked(ws_app, migrated_database) -> None:
+    from sqlalchemy import update
+
+    from app.db.models import UserToken
+    from app.services.user_service import hash_token
+
+    with TestClient(ws_app) as tc, tc.websocket_connect("/api/v1/ws/fleet", headers=AUTH) as ws:
+        assert ws.receive_json()["type"] == "hello"
+        _db(
+            migrated_database,
+            lambda s: s.execute(
+                update(UserToken)
+                .where(UserToken.token_hash == hash_token(WS_TOKEN))
+                .values(revoked_at=func.now())
+            ),
+        )
+        with pytest.raises(WebSocketDisconnect) as exc:
+            ws.receive_json()  # re-auth runs every 0.05s here
+        assert exc.value.code == 1008
+
+
+def test_websocket_closes_with_1012_on_resync(ws_app) -> None:
+    app = ws_app
+    with TestClient(app) as tc, tc.websocket_connect("/api/v1/ws/fleet", headers=AUTH) as ws:
+        assert ws.receive_json()["type"] == "hello"
+
+        async def resync() -> None:
+            app.state.hub.resync()
+
+        tc.portal.call(resync)
+        with pytest.raises(WebSocketDisconnect) as exc:
+            ws.receive_json()
+        assert exc.value.code == 1012  # client reconnects and reloads over REST

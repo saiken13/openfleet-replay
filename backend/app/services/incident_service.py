@@ -48,10 +48,16 @@ class IncidentService(Service):
         )
 
     async def update_status(
-        self, incident_id: uuid.UUID, status: IncidentStatus, now: datetime
+        self,
+        incident_id: uuid.UUID,
+        status: IncidentStatus,
+        now: datetime,
+        *,
+        actor: str | None = None,
     ) -> Incident:
         """Manual triage: OPEN -> INVESTIGATING, or resolve by hand. Resolved is final; if the
-        condition persists, detection opens a *new* incident."""
+        condition persists, detection opens a *new* incident. `actor` (the signed-in
+        operator) is recorded on the resolution event."""
         unlocked = await self.get(incident_id)
         robot = await self.robots.get(unlocked.robot_id, for_update=True)  # robot first
         inc = await self.incidents.get(incident_id, for_update=True)
@@ -73,8 +79,9 @@ class IncidentService(Service):
                 type=EventType.INCIDENT_RESOLVED,
                 severity=EventSeverity.INFO,
                 source="openfleet",
-                message=f"Incident resolved (manually): {inc.title}",
-                payload={"incident_id": str(inc.id), "reason": "manual"},
+                message=f"Incident resolved (manually{f' by {actor}' if actor else ''}): "
+                f"{inc.title}",
+                payload={"incident_id": str(inc.id), "reason": "manual", "actor": actor},
             )
         await self.session.flush()
         self.publish_after_commit(inc)

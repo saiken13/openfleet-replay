@@ -35,6 +35,38 @@ Keys: openfleet keys create|list|revoke → backend/openfleet_cli/keys.py → Ap
 Seed: app/main.py :: seed_robot_keys() at startup if OPENFLEET_ROBOT_KEYS_FILE → ApiKeyService.seed()
 ```
 
+## 0a′. User authentication (every read, triage, WebSockets)
+
+```
+Dashboard: POST /api/v1/auth/login {username, password} + X-OpenFleet-Client header
+→ backend/app/api/v1/auth.py :: login()
+→ UserService.login()  backend/app/services/user_service.py
+    ├─ UserRepository.by_username(lowercase)        unknown → verify against DUMMY_HASH (same timing)
+    ├─ passwords.verify_password() in a thread      scrypt, constant-time compare
+    └─ insert SESSION token (sha256), expires now + SESSION_TTL_S; COMMIT
+→ 200 UserRead + Set-Cookie openfleet_session (HttpOnly, SameSite=Strict, Path=/api)
+
+Any read: app/api/auth.py :: current_user()   (via require_viewer / require_operator)
+    ├─ Bearer header (API token) or else the session cookie   → none: 401
+    ├─ UserRepository.active_token(sha256, now)    not revoked, not expired, user not disabled → else 401
+    ├─ cookie + unsafe method without X-OpenFleet-Client → 403 (CSRF)
+    └─ require_operator: role < OPERATOR → 403      (PATCH /incidents/{id}; actor recorded on the event)
+
+WebSocket: app/api/v1/ws.py :: _pump()
+    ├─ Bearer or cookie; cookie needs an allowed Origin (CORS_ORIGINS or same host); valid token
+    │     else close 1008 before accept (HTTP 403)
+    ├─ reauth task: every WS_REAUTH_INTERVAL_S re-check the token → close 1008 when revoked/expired
+    └─ sender: hub RESYNC (bus lost messages, #025) → close 1012; the client reconnects + reloads REST
+
+Cross-replica (if OPENFLEET_REDIS_URL): app/realtime/bus.py :: RedisBus
+    Hub.publish → local subscribers → hub.forward → outbound queue → PUBLISH openfleet:realtime {o, s, c, m}
+    listener: other origin → seq check (gap → Hub.resync) → Hub.deliver (local only, never re-forwarded)
+
+POST /auth/logout → UserService.logout(): revoke if SESSION (API tokens untouched); clear cookie
+Users/tokens: openfleet users … → backend/openfleet_cli/users.py → UserService (direct DB)
+Seed: app/main.py :: seed_users() if OPENFLEET_USERS_FILE
+```
+
 ## 0b. Robot registration
 
 ```
@@ -121,6 +153,8 @@ Robot
 
 Sweeper (every SWEEP_INTERVAL_S; started in app lifespan, backend/app/main.py)
 → backend/app/workers/sweeper.py :: Sweeper.tick(now)      (now injectable for tests)
+→ backend/app/workers/lock.py :: AdvisoryLock.try_hold()   pg_try_advisory_lock on its own connection;
+                                                          not acquired → TickResult(skipped=True) (#024)
 → LivenessService.mark_stale_offline(now)      robots not OFFLINE with last_seen_at < now - HEARTBEAT_TIMEOUT_S
      └─ per robot: lock, Detector.evaluate()  → OFFLINE; heartbeat_missing incident if in a run (#019)
 → LivenessService.abort_abandoned_runs(now)    OFFLINE robots with a current run, silent > RUN_ABANDON_AFTER_S
@@ -166,6 +200,24 @@ frontend/src/pages/RunPage.tsx
 → frontend/src/replay/ReplayClock.ts      play/pause/seek/speed; emits frames by robot-time offset
 → dispatch({type: "frames"}) → frontend/src/state/robotReducer.ts     the same reducer live WS frames feed
 → frontend/src/components/RobotView.tsx   the same component the live robot page renders
+```
+
+## 5a. Re-detection replay (DECISIONS #023)
+
+```
+POST /api/v1/runs/{id}/redetect  {optional threshold overrides}      VIEWER, read-only
+→ backend/app/api/v1/runs.py :: redetect_run()
+→ backend/app/services/redetect_service.py :: RedetectService.redetect()
+   size check (OPENFLEET_REDETECT_MAX_SAMPLES) → effective DetectionConfig (settings + overrides)
+   analysis_repository.py: samples(), topic_samples() (grouped by seq), node_events()
+→ backend/app/detection/replay.py :: replay_run()                    pure
+   per batch (ts order): gap > timeout? → silent snapshot → heartbeat_missing
+                         apply node changes ≤ ts, carry metrics, classify_topic() again
+                         → RobotSnapshot → rules.evaluate_all() → _Reconciler.step()
+   run end → _Reconciler.end_run()
+→ _pair() / _keys(): per dedup_key vs recorded incidents → both | recorded_only | replay_only
+
+frontend/src/components/RedetectPanel.tsx (run page)   openfleet redetect RUN [--set k=v] [--fail-on-missed]
 ```
 
 ## 6. Compare and regression check

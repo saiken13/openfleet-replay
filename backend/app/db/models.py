@@ -29,7 +29,9 @@ from app.domain.enums import (
     RobotStatus,
     RunStatus,
     Severity,
+    TokenKind,
     TopicStatus,
+    UserRole,
 )
 
 
@@ -229,4 +231,40 @@ class RobotApiKey(Base):
     prefix: Mapped[str] = mapped_column(Text)  # first characters of the key, for display only
     label: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(TZ, server_default=func.now())
+    revoked_at: Mapped[datetime | None] = mapped_column(TZ)
+
+
+class User(Base):
+    """A dashboard / read-API user (DECISIONS #022). Managed with `openfleet users`."""
+
+    __tablename__ = "users"
+    __table_args__ = (enum_check("role", UserRole, "role"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    username: Mapped[str] = mapped_column(Text, unique=True)  # stored lowercase
+    password_hash: Mapped[str] = mapped_column(Text)  # scrypt, self-describing (app/core/passwords)
+    role: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(TZ, server_default=func.now())
+    disabled_at: Mapped[datetime | None] = mapped_column(TZ)
+
+
+class UserToken(Base):
+    """A user's session or API token. Only the SHA-256 of the token is stored."""
+
+    __tablename__ = "user_tokens"
+    __table_args__ = (
+        enum_check("kind", TokenKind, "kind"),
+        Index("ix_user_tokens_user_id", "user_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE")
+    )
+    kind: Mapped[str] = mapped_column(Text)
+    token_hash: Mapped[str] = mapped_column(Text, unique=True)
+    prefix: Mapped[str] = mapped_column(Text)
+    label: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(TZ, server_default=func.now())
+    expires_at: Mapped[datetime | None] = mapped_column(TZ)
     revoked_at: Mapped[datetime | None] = mapped_column(TZ)

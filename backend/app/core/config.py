@@ -20,16 +20,28 @@ class Settings(BaseSettings):
     # Auth (DECISIONS #021). Optional JSON file {robot_id: api_key} seeded at startup, for
     # demo/dev setups only; real deployments issue keys with `openfleet keys create`.
     robot_keys_file: Path | None = None
+    # Users (DECISIONS #022). Optional JSON {username: {password, role, token?}} seeded at
+    # startup, demo/dev only; real deployments use `openfleet users create`.
+    users_file: Path | None = None
+    session_ttl_s: float = Field(12 * 3600, gt=0)
+    cookie_secure: bool = False  # set true behind HTTPS
+    login_hint: str | None = None  # shown on the login page (e.g. demo credentials)
+    ws_reauth_interval_s: float = Field(30.0, gt=0)  # live sockets re-check their session
 
     # Liveness (server time, DECISIONS #010)
     heartbeat_timeout_s: float = Field(10.0, gt=0)
     sweep_interval_s: float = Field(2.0, gt=0)
     sweeper_enabled: bool = True
+    # Realtime fan-out between replicas (DECISIONS #025). Unset: in-process only, which is
+    # correct for a single backend process.
+    redis_url: str | None = None
     run_abandon_after_s: float = Field(60.0, gt=0)
 
     # Incidents
     incident_resolve_after_s: float = Field(10.0, ge=0)
     timeline_lookback_s: float = Field(60.0, ge=0)
+    # Re-detection replay (DECISIONS #023) loads a whole run into memory; ~14 h at 1 Hz.
+    redetect_max_samples: int = Field(50_000, gt=0)
 
     # Topic health
     topic_degraded_ratio: float = Field(0.7, gt=0, le=1)

@@ -17,6 +17,7 @@ dependencies = [
     "pydantic-settings>=2.4",
     "httpx>=0.27",  # openfleet CLI
     "pyyaml>=6.0",  # openfleet CLI regression config
+    "redis>=5.0",  # realtime fan-out between replicas (DECISIONS #025)
 ]
 
 [project.optional-dependencies]

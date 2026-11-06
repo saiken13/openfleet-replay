@@ -165,11 +165,13 @@ async def test_revoked_key_is_rejected_and_rotation_keeps_the_robot_up(
         await svc.revoke(uuid.uuid4())
 
 
-async def test_reads_stay_open_for_now(client: httpx.AsyncClient) -> None:
-    """Dashboard/read auth is step 2 of the auth work (HANDOFF); robot keys gate writes only."""
-    await register(client)
-    for path in ("/api/v1/robots", "/api/v1/robots/robot-01", "/api/v1/incidents", "/api/v1/runs"):
-        assert (await client.get(path, auth=None)).status_code == 200
+async def test_a_robot_key_is_not_a_user_credential(
+    client: httpx.AsyncClient, db_session: AsyncSession
+) -> None:
+    """Robot keys only open robot writes; reads need a user (DECISIONS #022)."""
+    key = await issue(db_session)
+    resp = await client.get("/api/v1/robots", headers=bearer(key), auth=None)
+    assert resp.status_code == 401
 
 
 async def test_issued_keys_are_stored_hashed(db_session: AsyncSession) -> None:

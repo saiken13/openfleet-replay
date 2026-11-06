@@ -77,3 +77,15 @@ class LogLevel(StrEnum):
     WARN = "WARN"
     ERROR = "ERROR"
     FATAL = "FATAL"
+
+
+class UserRole(StrEnum):
+    """Dashboard/read-API roles (DECISIONS #022). Each role includes the ones before it."""
+
+    VIEWER = "VIEWER"  # read everything, live views
+    OPERATOR = "OPERATOR"  # + incident triage
+
+
+class TokenKind(StrEnum):
+    SESSION = "SESSION"  # dashboard login, sent as an HttpOnly cookie; expires
+    API = "API"  # CLI/CI (`openfleet check`), sent as a Bearer token; optional expiry

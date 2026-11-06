@@ -14,8 +14,11 @@ from app.api.v1.router import api_router
 from app.core.config import Settings, get_settings
 from app.db.engine import build_engine
 from app.db.session import build_sessionmaker
+from app.realtime.bus import RedisBus
 from app.realtime.hub import Hub
 from app.services.api_key_service import ApiKeyService
+from app.services.user_service import UserService
+from app.workers.lock import AdvisoryLock
 from app.workers.sweeper import Sweeper
 
 log = logging.getLogger(__name__)
@@ -41,6 +44,22 @@ async def seed_robot_keys(
     )
 
 
+async def seed_users(settings: Settings, sessionmaker: async_sessionmaker[AsyncSession]) -> None:
+    if settings.users_file is None:
+        return
+    spec = json.loads(settings.users_file.read_text())
+    if not isinstance(spec, dict):
+        raise ValueError(f"{settings.users_file}: expected a JSON object of username -> user")
+    async with sessionmaker() as session:
+        created = await UserService(session).seed(spec)
+    log.warning(
+        "seeded users from %s (%d new, %d total). Demo/dev only.",
+        settings.users_file,
+        created,
+        len(spec),
+    )
+
+
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or get_settings()
     logging.basicConfig(level=settings.log_level)
@@ -52,7 +71,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.sessionmaker = build_sessionmaker(app.state.engine)
         app.state.hub = Hub()
         await seed_robot_keys(settings, app.state.sessionmaker)
-        app.state.sweeper = Sweeper(app.state.sessionmaker, app.state.hub, settings)
+        await seed_users(settings, app.state.sessionmaker)
+        app.state.sweeper = Sweeper(
+            app.state.sessionmaker,
+            app.state.hub,
+            settings,
+            lock=AdvisoryLock(app.state.engine),
+        )
+        app.state.bus = RedisBus(app.state.hub, settings.redis_url) if settings.redis_url else None
+        if app.state.bus is not None:
+            await app.state.bus.start()
         task = (
             asyncio.create_task(app.state.sweeper.run_forever())
             if settings.sweeper_enabled
@@ -65,6 +93,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await task
+            if app.state.bus is not None:
+                await app.state.bus.stop()
             await app.state.engine.dispose()
 
     app = FastAPI(

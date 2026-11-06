@@ -1,0 +1,4 @@
+{
+  "operator": {"password": "operator-demo", "role": "operator"},
+  "viewer": {"password": "viewer-demo", "role": "viewer", "token": "ofu_demo_viewer_public-not-secret"}
+}

@@ -23,6 +23,7 @@ OpenFleet Replay collects robot telemetry and tracks the health of ROS topics an
   - Each has a timeline showing what happened first.
 - **Runs:** every operating session is recorded with its software version. Starting and ending runs is idempotent (client-generated IDs).
 - **Replay:** scrub through a past run at 1×–16×. The frontend feeds replay frames into the *same reducer* as the live WebSocket, so there's one UI, not two.
+- **Re-detection replay:** run the *current* rules (or thresholds you're trying out) over a recorded run and see which recorded failures they'd still catch, which they'd miss, which are new, and when each would have fired. On the run page, or `openfleet redetect RUN [--set cpu_high_pct=80]`.
 - **Compare and check:**
   - Diff two runs in the UI.
   - Or gate CI with `openfleet check RUN --config regression.yaml [--baseline RUN]`, which exits 1 on regression.
@@ -56,21 +57,36 @@ Open the dashboard, click an incident, then **Replay from 15s before ▶**.
 
 Without `--profile demo` you get the platform with an empty fleet. Run the simulator yourself (see below).
 
-Robots authenticate with per-robot API keys (see below). The local stack seeds the **public** demo keys in `examples/demo-robot-keys.json`, so the demo works with no setup. Never expose that configuration.
+Sign in as **operator / operator-demo** (can triage incidents) or **viewer / viewer-demo** (read-only). The login page shows these too.
 
-Postgres is published on host port **5433** (not 5432), so it doesn't clash with a locally installed Postgres. Override it with `OPENFLEET_PG_HOST_PORT`.
+The local stack seeds **public** demo credentials so it works with no setup: users and a viewer API token from `examples/demo-users.json`, and robot keys from `examples/demo-robot-keys.json`. Never expose that configuration (see [Authentication](#authentication)).
 
-## Robot API keys
+Postgres is published on host port **5433** (not 5432), so it doesn't clash with a locally installed Postgres. Override it with `OPENFLEET_PG_HOST_PORT`. Redis (realtime fan-out between replicas) is on host port **6380** (`OPENFLEET_REDIS_HOST_PORT`).
 
-Every robot write (register, heartbeat, runs, telemetry) needs `Authorization: Bearer <key>`, and a key only works for its own robot. Reads are still open (dashboard auth is next). Manage keys on the server:
+## Authentication
+
+There are two kinds of credentials:
+- **Robots** use a per-robot API key on their writes (register, heartbeat, runs, telemetry). A key only works for its own robot.
+- **People** sign in to the dashboard. Every read and live view needs a user. Roles:
+  - **viewer:** reads everything.
+  - **operator:** can also triage incidents.
+- **CLI and CI** (`openfleet check`) use a user API token.
+
+Manage everything on the server:
 
 ```bash
-docker compose exec backend openfleet keys create ros-bot-01 --label "lab TurtleBot"   # prints the key once
-docker compose exec backend openfleet keys list [--robot ros-bot-01]
-docker compose exec backend openfleet keys revoke KEY_ID
+docker compose exec backend openfleet keys create ros-bot-01 --label "lab TurtleBot"   # robot key, printed once
+docker compose exec backend openfleet keys list | revoke KEY_ID
+docker compose exec backend openfleet users create alice --role operator             # prompts for a password
+docker compose exec backend openfleet users list | set-role alice viewer | passwd alice | disable alice
+docker compose exec backend openfleet users token create ci-bot --label ci --expires-days 90   # → OPENFLEET_TOKEN
 ```
 
-To rotate a key, create a new one, deploy it, then revoke the old one. A robot can hold several active keys. See [DECISIONS #021](docs/DECISIONS.md).
+- **Rotating a robot key:** create a new one, deploy it, then revoke the old one. A robot can hold several active keys.
+- **Sessions:** HttpOnly SameSite=Strict cookies that last 12 h.
+- **Production:** behind HTTPS, set `OPENFLEET_COOKIE_SECURE=true`. Drop the demo `*_FILE` and `LOGIN_HINT` settings, and rate-limit `/api/v1/auth/login` at your proxy.
+
+See [DECISIONS #021 and #022](docs/DECISIONS.md).
 
 ## Connect a real ROS 2 robot
 
@@ -95,6 +111,7 @@ python collector/ros_test/e2e.py   # scripts a degradation, a stop, a node crash
 ```bash
 pip install -e backend -e simulator
 export OPENFLEET_ROBOT_KEYS_FILE=examples/demo-robot-keys.json                   # robot keys
+export OPENFLEET_TOKEN=ofu_demo_viewer_public-not-secret                         # read token
 openfleet-sim -s simulator/scenarios/healthy.yaml --fast -o base.json            # v1.0.0
 openfleet-sim -s simulator/scenarios/lidar_regression.yaml --fast -o cand.json   # v1.1.0
 openfleet check "$(jq -r '.[0].run_id' cand.json)" -c examples/regression.yaml \
@@ -110,6 +127,8 @@ Run c9b8e261-…  robot=ci-01  version=1.1.0
 ```
 
 This exact flow runs in this repo's CI (`e2e-regression-check`). The healthy run must pass and the regression must fail.
+
+To check a rule or threshold change against recorded failures instead, use `openfleet redetect RUN --fail-on-missed [--set NAME=VALUE ...]`: it exits 1 if a failure recorded in that run would no longer be detected.
 
 > Replay never re-runs robot software: a recording always gives the same result. To regression-test a new build, produce a **new run** with it (simulator or ROS 2 sim in CI), then `check` it against a baseline. See [ARCHITECTURE §7](docs/ARCHITECTURE.md).
 
@@ -129,7 +148,7 @@ A single backend process (a modular monolith) contains:
 - a pure-function detection engine
 - an incident reconciler
 - a liveness sweeper
-- an in-process realtime hub
+- a realtime hub (in-process; with Redis pub/sub between replicas, so you can run several backends)
 
 Details: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) · Why it's built this way: [docs/DECISIONS.md](docs/DECISIONS.md) · Request flows: [docs/FLOW.md](docs/FLOW.md)
 
@@ -143,8 +162,8 @@ cd backend
 python3.12 -m venv .venv && .venv/bin/pip install -e ".[dev]"
 .venv/bin/alembic upgrade head
 .venv/bin/pytest                         # real Postgres, separate `openfleet_test` DB (auto-created)
-OPENFLEET_ROBOT_KEYS_FILE=../examples/demo-robot-keys.json \
-  .venv/bin/uvicorn app.main:app --reload  # http://localhost:8000 (seeds the demo robot keys)
+OPENFLEET_ROBOT_KEYS_FILE=../examples/demo-robot-keys.json OPENFLEET_USERS_FILE=../examples/demo-users.json \
+  .venv/bin/uvicorn app.main:app --reload  # http://localhost:8000 (seeds demo robot keys and users)
 
 # Simulator
 cd simulator
@@ -165,19 +184,18 @@ npm test && npm run typecheck
 | Path | Contents |
 |---|---|
 | `backend/app/` | FastAPI app: `api/` (routers), `services/`, `repositories/` (SQL), `detection/` (pure rules), `realtime/` (hub), `workers/` (sweeper) |
-| `backend/openfleet_cli/` | `openfleet check` regression CLI (thin HTTP client) and `openfleet keys` (robot API keys, direct DB) |
+| `backend/openfleet_cli/` | `openfleet check` regression CLI (thin HTTP client), `openfleet keys` and `openfleet users` (credentials, direct DB) |
 | `backend/alembic/` | Migrations (CI runs `alembic check` so models and migrations can't drift) |
 | `collector/` | ROS 2 collector (runs on the robot) + ROS 2 end-to-end test |
 | `simulator/` | Simulated robots + YAML failure scenarios (public API only) |
 | `frontend/` | React + TypeScript + Vite + Tailwind dashboard |
-| `examples/` | Example regression config; public demo robot keys |
+| `examples/` | Example regression config; public demo robot keys and users |
 | `docs/` | Architecture, decisions, flows, constraints, bugs |
 
 ## Status and limits
 
 This is an MVP. It's single-process by design. The known scaling limits and their evolution paths are listed in [ARCHITECTURE §10](docs/ARCHITECTURE.md). These aren't built yet:
-- dashboard/user authentication, roles and WebSocket auth (robot API keys are done)
-- re-detection replay
+- SSO/OIDC and multi-tenancy (built-in users, roles and robot keys are done)
 - rosbag/MCAP recordings
 
 ## License

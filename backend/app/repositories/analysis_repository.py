@@ -4,10 +4,11 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import select, text
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import Event, TelemetrySample, TopicSample
+from app.domain.enums import EventType
 
 _METRICS_SQL = text(
     """
@@ -91,4 +92,34 @@ class AnalysisRepository:
             else:
                 stmt = stmt.where((model.ts > c_ts) | ((model.ts == c_ts) & (model.id > c_id)))
         stmt = stmt.order_by(model.ts, model.id).limit(limit)
+        return list(await self.session.scalars(stmt))
+
+    # --- re-detection (DECISIONS #023) -----------------------------------------------------
+
+    async def sample_count(self, run_id: uuid.UUID) -> int:
+        stmt = select(func.count()).where(TelemetrySample.run_id == run_id)
+        return int(await self.session.scalar(stmt) or 0)
+
+    async def samples(self, run_id: uuid.UUID) -> list[TelemetrySample]:
+        stmt = (
+            select(TelemetrySample)
+            .where(TelemetrySample.run_id == run_id)
+            .order_by(TelemetrySample.ts, TelemetrySample.id)
+        )
+        return list(await self.session.scalars(stmt))
+
+    async def topic_samples(self, run_id: uuid.UUID) -> list[TopicSample]:
+        stmt = (
+            select(TopicSample)
+            .where(TopicSample.run_id == run_id)
+            .order_by(TopicSample.ts, TopicSample.id)
+        )
+        return list(await self.session.scalars(stmt))
+
+    async def node_events(self, run_id: uuid.UUID) -> list[Event]:
+        stmt = (
+            select(Event)
+            .where(Event.run_id == run_id, Event.type == EventType.NODE_STATE_CHANGED)
+            .order_by(Event.ts, Event.id)
+        )
         return list(await self.session.scalars(stmt))

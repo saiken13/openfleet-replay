@@ -70,7 +70,7 @@ Don't edit old decisions to change them. Add a new entry that supersedes the old
 **Date:** 2026-11-05
 
 ## 009 — No Kafka/NATS/Redis in the MVP
-**Status:** Accepted (2026-11-05)
+**Status:** Accepted (2026-11-05). Partly superseded by #025: Redis now carries realtime fan-out between replicas. Ingest is still plain HTTP.
 **Decision:** Use HTTP ingest and an in-process pub/sub hub.
 **Why:** No current requirement needs a broker: one backend process, demo-scale volume. A broker adds operational load (another service in compose, delivery semantics to reason about) with no benefit yet.
 **When to revisit:** when we run multiple backend replicas (fan-out), when detection latency affects ingest latency, or when we need to buffer ingest bursts. All of these are triggers we'll *measure*.
@@ -234,3 +234,126 @@ Both showed up in the first end-to-end demo.
 - The demo keys are public. Any deployment reachable by others must drop `OPENFLEET_ROBOT_KEYS_FILE` and revoke the seeded keys.
 - There's no `last_used_at` tracking, to keep the ingest path read-only on the key table.
 **Date:** 2026-11-05
+
+## 022 — User authentication: cookie sessions for the dashboard, API tokens for CLI/CI, viewer/operator roles, authenticated WebSockets
+**Status:** Accepted (2026-11-05). Steps 2–4 of auth (step 1 is #021).
+**Decision:**
+- **Users:** a `users` table (migration 0004) with a username (stored lowercase), a password hash, a role and `disabled_at`.
+  - Passwords are hashed with stdlib **scrypt** (N=2^14, r=8, p=1; ~50 ms). The hash string records its own cost parameters, so the cost can be raised later.
+  - Hashing and checking run in a worker thread. An unknown user is checked against a dummy hash, so a login takes the same time either way, and every failure returns the same 401 message.
+- **Roles:** `VIEWER` can read everything (REST and WebSockets). `OPERATOR` can also triage (`PATCH /incidents/{id}`), and the operator's username is recorded on the manual-resolution event.
+  - A role change applies to existing sessions immediately, because the role is read on every request.
+- **Credentials:** a `user_tokens` table holds two kinds of token, both stored as SHA-256 like robot keys.
+  - **Sessions** (`ofs_…`) are created by `POST /auth/login` and live only in a cookie: `openfleet_session`, HttpOnly, SameSite=Strict, Path=/api, with an absolute TTL (`SESSION_TTL_S`, 12 h) and `Secure` when `COOKIE_SECURE` is set. `POST /auth/logout` revokes the session.
+  - **API tokens** (`ofu_…`) are for the CLI and CI, sent as `Authorization: Bearer`. They have an optional expiry and are created with `openfleet users token create`. `openfleet check` reads `--token` / `OPENFLEET_TOKEN`.
+  - A Bearer header wins over the cookie.
+- **Enforcement:** every read route depends on `require_viewer` and triage on `require_operator`.
+  - A structural test walks all routes and fails if any `/api/v1` route has neither robot nor user auth, apart from an explicit public list: health, `auth/config`, login and logout.
+  - A robot key is never a user credential, and a user token is never a robot credential.
+- **CSRF:** SameSite=Strict, plus a required `X-OpenFleet-Client` header on cookie-authenticated unsafe requests and on login. A cross-site page can't add that header without a CORS preflight, and we never allow credentialed CORS. The dashboard sends the header on every request.
+- **WebSockets:** the handshake needs a live session cookie or a Bearer API token; otherwise it is closed with 1008 (HTTP 403).
+  - Cookie handshakes must come from an allowed Origin (`CORS_ORIGINS` or the same host), because browsers don't apply CORS to WebSockets. nginx now forwards `$http_host` so the port survives that comparison.
+  - An open socket re-checks its credential every `WS_REAUTH_INTERVAL_S` (30 s) and closes with 1008 once it is revoked, expired, or its user is disabled.
+- **Management:** `openfleet users create|list|set-role|passwd|disable|enable|token create|list|revoke`, using direct DB access like `openfleet keys` (#021).
+  - Passwords are read from a prompt or `--password-stdin`, never from argv.
+  - `passwd` ends the user's sessions but keeps their API tokens.
+  - `disable` revokes every token, and re-enabling a user doesn't revive any of them.
+- **Zero-setup demo:** `OPENFLEET_USERS_FILE` seeds `{username: {password, role, token?}}` at startup. Seeding never overwrites an existing user's password or role, and never un-revokes a token.
+  - Compose seeds the public `examples/demo-users.json` (operator/operator-demo, viewer/viewer-demo, plus a viewer API token for CI and the ROS e2e).
+  - Compose also sets `OPENFLEET_LOGIN_HINT`, which the login page shows (`GET /auth/config`).
+- **Dashboard:** an AuthProvider resolves `/auth/me`; with no session it shows the login page. Any later 401 returns to the login page, and a closed live socket triggers that check too.
+  - The header shows the user and role and a sign-out button. Triage buttons appear only for operators; viewers see "View only".
+**Why:**
+- **Cookie, not bearer, for the browser:** an HttpOnly cookie can't be read by injected script, while tokens in localStorage can. A cookie also authenticates the WebSocket handshake with no token in the URL, where it would end up in logs and history.
+- **Opaque server-side tokens, not JWTs:** logout, disable and role changes take effect immediately. It costs one indexed lookup per request.
+- **scrypt:** it's in the stdlib, so no new dependency, and it's memory-hard.
+- **Two roles:** viewer and operator are the only distinction the product has today. An admin role isn't needed while user management is a database-level CLI.
+**Alternatives considered:**
+- An OIDC/SSO provider: the right fit for organizations, but it would break the zero-setup demo. It can be added later as another way to create a session.
+- JWTs in localStorage: XSS-readable, and can't be revoked without a server lookup anyway.
+- bcrypt/argon2 via a dependency: comparable strength, but one more native wheel to ship.
+- Passing the WS token as a query parameter: it leaks into proxy logs.
+**Tradeoffs and migration:**
+- **Breaking API change:** every read and every WebSocket now needs a user. Create users with `openfleet users create`, and give CI and other read scripts an API token (`OPENFLEET_TOKEN`).
+- There's no login rate limiting or lockout yet. The ~50 ms hash slows guessing, but a reachable deployment should rate-limit `/auth/login` at the proxy.
+- Session expiry is absolute, not sliding. A user is signed out after 12 h even while active.
+- An open WebSocket can outlive its revocation by up to `WS_REAUTH_INTERVAL_S`.
+- The demo credentials are public. Never set the demo `USERS_FILE` or `LOGIN_HINT` on a reachable deployment.
+**Date:** 2026-11-05
+
+## 023 — Re-detection replay: pure rules + a pure reconciler mirror over the stored batches, in robot time, read-only
+**Status:** Accepted (2026-11-06).
+**Decision:**
+- `POST /runs/{id}/redetect` (VIEWER, read-only) runs the **current** rule set, optionally with overridden thresholds in the body, over a recorded run and compares the result with the run's recorded incidents. An empty body answers "would today's rules have caught this?".
+- **Engine:** `app/detection/replay.py :: replay_run()` is pure, like the rules. For each stored batch (in `ts` order) it rebuilds the `RobotSnapshot` the live detector would have seen, calls the same `evaluate_all`, and feeds the findings to `_Reconciler`, a pure mirror of `Detector.reconcile`: open, escalate in place, auto-resolve after `incident_resolve_after_s`, never resolve while offline, resolve data incidents at run end and keep heartbeat incidents open.
+- **Snapshot reconstruction:**
+  - Metrics: the last non-null value carries forward, as on the robot row.
+  - Topics: classified **again** from the stored rates with the given thresholds (`classify_topic`); a topic counts only while it was reported within the heartbeat timeout (#017).
+  - Nodes: from the run's `node_state_changed` events (change-only), applied at their `ts`.
+  - Liveness: from the batches. A gap longer than `heartbeat_timeout_s` is the robot going silent: `heartbeat_missing` opens at `prev + timeout` and is re-detected until the next batch.
+- **Comparison:** per `dedup_key`, a verdict of `both` (caught), `recorded_only` (missed) or `replay_only` (new), with counts, peak severities and first-detection offsets from the run start. The n-th replayed incident for a key pairs with the n-th recorded one.
+- **Clients:** `openfleet redetect RUN [--set NAME=VALUE ...] [--fail-on-missed] [--json]` (exit 1 with `--fail-on-missed` when a recorded failure is no longer detected), and a panel on the run page with a threshold form and "first detected" links that seek the replay.
+- **Limit:** `OPENFLEET_REDETECT_MAX_SAMPLES` (50 000 batches, ~14 h at 1 Hz), because the whole run is loaded into memory; larger runs get a 422.
+**Why:**
+- Reusing the pure rules (CONSTRAINTS) means the replay can't drift from live detection on *what* fires; a parity test (`test_replay_with_current_rules_matches_live_detection`) checks that a live run and its replay agree on keys, counts, severities and titles.
+- A separate pure reconciler instead of running `Detector` against a scratch transaction: no writes, no locks, no events or realtime publishes to suppress, and it's unit-testable without a DB.
+- Robot time instead of server time: a run uploaded with `--fast` replays with its real durations, so hysteresis behaves as it would have in real time (the live fast-mode gotcha doesn't apply).
+- Read-only and stateless: nothing is stored, so changing thresholds and re-running is free.
+**Alternatives considered:**
+- Storing replay results as "shadow incidents": needs a schema and lifecycle that nothing needs yet.
+- Replaying through the ingest path into a throwaway robot: real writes, real events, and cleanup.
+- Running in a worker with progress reporting: not needed below the size limit (a 1-hour run is a few hundred ms).
+**Tradeoffs:**
+- Heartbeats aren't stored, so a robot that kept heartbeating but stopped sending telemetry mid-run shows as `heartbeat_missing` in the replay, where live it only saw stale data.
+- A node's state persists until its next change event; a node that stopped being reported keeps its last state (live, it goes stale after the heartbeat timeout).
+- Recorded incident times are server time and replay times are robot time; the offsets are comparable only when the robot clock was roughly right (BUG-003).
+- Rule *code* changes are picked up automatically (it's the deployed rule set); there is no way to replay with an older rule set.
+**Date:** 2026-11-06
+
+## 024 — Sweeper: a per-tick Postgres advisory lock, so any number of replicas can run it
+**Status:** Accepted (2026-11-06).
+**Decision:**
+- Every backend replica still starts the sweeper loop. Each tick first calls `pg_try_advisory_lock(SWEEPER_LOCK_KEY)` on a dedicated pool connection (`app/workers/lock.py :: AdvisoryLock.try_hold`). The holder sweeps and then unlocks. Replicas that don't get it skip that tick (`TickResult.skipped`).
+- The lock is **session-level**, because a tick commits once per robot and a transaction-level lock would be released at the first commit.
+- If the unlock can't be confirmed (for example, it was cancelled mid-call), the connection is invalidated rather than returned to the pool, so Postgres drops the lock along with the session.
+- `Sweeper(lock=None)` sweeps unconditionally (tests); `create_app` always passes a lock.
+**Why:**
+- No leader election and no lease to renew. The lock is held for milliseconds, and whichever replica asks first in an interval does the work, so losing a replica costs at most one interval.
+- The per-robot work takes row locks and deduplicates incidents, but two sweepers still repeat each other's work every interval. The lock removes the overlap instead of relying on every future sweeper step being idempotent.
+- No new infrastructure: Postgres is already the coordination point.
+**Alternatives considered:**
+- A long-lived leader lock held for the process lifetime: it fails over only when the holder's connection dies, and it needs a keepalive and re-acquire loop.
+- A dedicated sweeper worker deployment: another deployable to run before it's needed. The lock keeps that option open, since a worker would simply be the only process with `SWEEPER_ENABLED=true`.
+- `SKIP LOCKED` per-robot claiming: spreads the work across replicas, but a tick is a few cheap queries, so there's nothing worth spreading yet.
+**Tradeoffs:**
+- It needs a direct or session-pooled Postgres connection. A transaction-pooling PgBouncer would break session-level locks.
+- Each tick briefly uses a second pool connection.
+- This makes the **sweeper** multi-replica safe, but not the realtime hub: a broadcast still reaches only the WebSocket clients of the replica that produced it, sweeper broadcasts included. Running several replicas still needs hub fan-out (Redis/NATS, ARCHITECTURE §10).
+**Date:** 2026-11-06
+
+## 025 — Realtime fan-out across replicas: Redis pub/sub, local-first delivery, gap detection → resync
+**Status:** Accepted (2026-11-06). Partly supersedes #009.
+**Decision:**
+- **Local first.** `Hub.publish` delivers to local subscribers and then calls `hub.forward`. When `OPENFLEET_REDIS_URL` is set, `forward` is `app/realtime/bus.py :: RedisBus`. Messages from other replicas arrive through `Hub.deliver`, which is local only, so nothing bounces back out.
+- **Transport.** One Redis pub/sub channel (`openfleet:realtime`) carries `{o: instance id, s: seq, c: channels, m: message}`. A single sender task drains a bounded outbound queue, so the publisher never blocks and messages from one replica stay in order. Each replica ignores its own echoes.
+- **Loss detection, not prevention.**
+  - `s` counts every message the instance produced, including ones dropped on queue overflow or a failed publish.
+  - A heartbeat repeats the current `s` every 5 s, so losses at the tail of a burst are caught too.
+  - A receiver that sees a gap from any origin, or that has just (re)subscribed, calls `Hub.resync()`.
+  - Every local WebSocket then closes with **1012**. The dashboard already reconnects and reloads state over REST on every reconnect, so no frontend change was needed.
+- **No `REDIS_URL`** means an in-process hub only, which is correct for one backend process (tests, local `uvicorn`). Docker Compose runs Redis 7 (host port 6380) and sets the URL.
+- **Redis down** costs only cross-replica delivery: requests, local delivery and startup keep working, and the loops retry with backoff.
+**Why:**
+- WS messages were already hints with REST as the source of truth (ARCHITECTURE §8). Fan-out doesn't need durable delivery, just *knowing* when something was lost; the client already repairs a lost delta by reloading.
+- Local-first keeps single-replica latency and behaviour exactly as before, and a Redis outage degrades the system instead of breaking it.
+- Redis is the smallest broker that does pub/sub. It also covers the next likely needs (rate limiting, liveness caching, ARCHITECTURE §10), so it's a well-used piece of infrastructure rather than a one-off.
+**Alternatives considered:**
+- Postgres `LISTEN/NOTIFY`: no new service, but there's an 8 KB payload limit (frames are larger), notifications are delivered inside the commit path, and every replica would hold a dedicated listening connection.
+- NATS: also a good fit, but less widely known and with nothing else here to use it for.
+- Redis Streams (durable, replayable): more machinery (consumer positions, trimming) to guarantee deliveries that the client doesn't need.
+- Publishing only through Redis and delivering only from the echo: one code path, but every local message pays a round trip and Redis becomes a hard dependency for live updates.
+**Tradeoffs:**
+- A resync closes *all* of a replica's sockets, not only the affected channels. That's rare (Redis restarts or subscription losses) and cheap for clients.
+- The first publish after a Redis restart can fail on a stale pooled connection. It's counted as lost, and the gap check repairs it.
+- Every replica receives every message, whether or not it has subscribers for those channels. At fleet scale this would become per-channel Redis subscriptions.
+**Date:** 2026-11-06

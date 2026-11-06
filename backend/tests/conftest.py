@@ -34,15 +34,20 @@ from sqlalchemy.ext.asyncio import (
 
 from alembic import command
 from app.api.deps import get_now
+from app.core import passwords
 from app.core.config import Settings
 from app.db.session import get_session
 from app.domain.errors import DomainError
 from app.main import create_app
 from app.realtime.hub import Hub
 from app.services.api_key_service import ApiKeyService
+from app.services.user_service import UserService
 from app.workers.sweeper import Sweeper
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
+
+# Cheap password hashing in tests (the stored hash records its own cost, so this is safe).
+passwords.SCRYPT_N = 2**4
 
 ClientFactory = Callable[..., AbstractAsyncContextManager[httpx.AsyncClient]]
 
@@ -141,19 +146,29 @@ def test_key(robot_id: str) -> str:
 
 _ROBOT_PATH = re.compile(r"^/api/v1/robots/([^/]+)")
 _RUN_PATH = re.compile(r"^/api/v1/runs/([0-9a-fA-F-]{36})(/|$)")
+_ROBOT_WRITE = re.compile(r"^/api/v1/(robots/[^/]+(/heartbeat)?|runs/[^/]+(/telemetry|/end)?)$")
 DEFAULT_TEST_ROBOT = "robot-01"
+TEST_USER = "test-operator"
+TEST_USER_PASSWORD = "test-operator-password"
+TEST_USER_TOKEN = "ofu_test-operator-token"
+
+
+def is_robot_write(request: httpx.Request) -> bool:
+    return request.method in ("PUT", "POST") and bool(_ROBOT_WRITE.match(request.url.path))
 
 
 class RobotKeyAuth(httpx.Auth):
-    """Signs each request as the robot it acts for, issuing that robot's key on first use
-    (inside the test transaction, so it rolls back). This keeps API tests about behaviour,
-    not credentials; tests/test_auth.py checks the auth itself with `auth=None`."""
+    """Signs each request with the credential it needs, issued on first use inside the test
+    transaction (so it rolls back): robot writes as the robot they act for, everything else
+    as an OPERATOR user. This keeps API tests about behaviour, not credentials;
+    tests/test_auth.py and tests/test_user_auth.py check auth itself with `auth=None`."""
 
     requires_request_body = True
 
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
         self.issued: set[str] = set()
+        self.user_seeded = False
 
     async def _robot_for(self, request: httpx.Request) -> str:
         path = request.url.path
@@ -189,6 +204,24 @@ class RobotKeyAuth(httpx.Auth):
     async def async_auth_flow(
         self, request: httpx.Request
     ) -> AsyncGenerator[httpx.Request, httpx.Response]:
+        if not is_robot_write(request):
+            if request.url.path.startswith("/api/v1/auth/"):
+                yield request  # login/logout tests manage their own credentials
+                return
+            if not self.user_seeded:
+                await UserService(self.session).seed(
+                    {
+                        TEST_USER: {
+                            "password": TEST_USER_PASSWORD,
+                            "role": "operator",
+                            "token": TEST_USER_TOKEN,
+                        }
+                    }
+                )
+                self.user_seeded = True
+            request.headers["Authorization"] = f"Bearer {TEST_USER_TOKEN}"
+            yield request
+            return
         robot_id = await self._robot_for(request)
         if not await self._ensure_key(robot_id):
             # An invalid robot id can't hold a key; sign with a valid one so the
@@ -254,9 +287,9 @@ def sweeper(db_session: AsyncSession, settings: Settings) -> Sweeper:
 
 
 async def purge_robots(session: AsyncSession, prefix: str) -> None:
-    """Delete every row belonging to robots whose id starts with `prefix` (children first).
+    """Delete every row belonging to robots (and users) whose id starts with `prefix`.
     For tests that must commit for real and so can't use the rolled-back `db_session`."""
-    from sqlalchemy import delete
+    from sqlalchemy import delete, select
 
     from app.db.models import (
         Event,
@@ -268,8 +301,13 @@ async def purge_robots(session: AsyncSession, prefix: str) -> None:
         TelemetrySample,
         TopicSample,
         TopicState,
+        User,
+        UserToken,
     )
 
+    users = select(User.id).where(User.username.startswith(prefix))  # real-commit test users
+    await session.execute(delete(UserToken).where(UserToken.user_id.in_(users)))
+    await session.execute(delete(User).where(User.username.startswith(prefix)))
     for model in (
         Incident,
         Event,

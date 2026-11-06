@@ -209,3 +209,149 @@ def test_keys_errors_exit_2(keys_db: list[str], capsys) -> None:
     unreachable = ["keys", "--database-url", "postgresql+asyncpg://x:y@127.0.0.1:1/none"]
     assert main([*unreachable, "list"]) == EXIT_ERROR
     assert "database error" in capsys.readouterr().err
+
+
+def test_users_lifecycle(keys_db: list[str], migrated_database: str, capsys, monkeypatch) -> None:
+    import io
+
+    db = ["users", "--database-url", migrated_database]
+    name = "concurrency-cli-alice"
+    monkeypatch.setattr("sys.stdin", io.StringIO("a-good-password\n"))
+    assert main([*db, "create", name, "--role", "viewer", "--password-stdin"]) == EXIT_OK
+    assert "created user" in capsys.readouterr().out
+
+    assert main([*db, "list", "--json"]) == EXIT_OK
+    users = {u["username"]: u for u in json.loads(capsys.readouterr().out)}
+    assert users[name]["role"] == "VIEWER" and users[name]["disabled_at"] is None
+
+    assert main([*db, "set-role", name, "operator"]) == EXIT_OK
+    assert "now operator" in capsys.readouterr().out
+
+    assert main([*db, "token", "create", name, "--label", "ci", "--expires-days", "30"]) == EXIT_OK
+    captured = capsys.readouterr()
+    token = captured.out.strip()
+    assert token.startswith("ofu_") and "OPENFLEET_TOKEN" in captured.err
+
+    assert main([*db, "token", "list", "--user", name, "--json"]) == EXIT_OK
+    [row] = json.loads(capsys.readouterr().out)
+    assert row["kind"] == "API" and row["label"] == "ci" and row["expires_at"] is not None
+    assert token not in json.dumps(row)
+
+    assert main([*db, "disable", name]) == EXIT_OK
+    capsys.readouterr()
+    assert main([*db, "token", "list", "--user", name]) == EXIT_OK
+    assert "revoked" in capsys.readouterr().out
+    assert main([*db, "enable", name]) == EXIT_OK
+    assert main([*db, "token", "revoke", row["id"]]) == EXIT_OK  # idempotent on revoked
+    capsys.readouterr()
+
+    monkeypatch.setattr("sys.stdin", io.StringIO("short\n"))
+    assert main([*db, "passwd", name, "--password-stdin"]) == EXIT_ERROR
+    assert "at least" in capsys.readouterr().err
+    assert main([*db, "create", name, "--password-stdin"]) == EXIT_ERROR  # exists (stdin empty)
+    assert main([*db, "set-role", "concurrency-cli-nobody", "viewer"]) == EXIT_ERROR
+    assert "not found" in capsys.readouterr().err
+
+
+def test_check_sends_the_token_and_explains_401(cfg_file: Path, capsys) -> None:
+    seen: list[str | None] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.headers.get("Authorization"))
+        if request.headers.get("Authorization") != "Bearer ofu_good":
+            return httpx.Response(401, json={"detail": "not signed in"})
+        return httpx.Response(200, json=summary())
+
+    t = httpx.MockTransport(handler)
+    assert main(["check", "r1", "-c", str(cfg_file), "--token", "ofu_good"], t) == EXIT_OK
+    assert seen == ["Bearer ofu_good"]
+    capsys.readouterr()
+    assert main(["check", "r1", "-c", str(cfg_file), "--token", "ofu_bad"], t) == EXIT_ERROR
+    assert "OPENFLEET_TOKEN" in capsys.readouterr().err
+
+
+# --- redetect ------------------------------------------------------------------------------
+
+
+def redetect_result(missed: int = 0) -> dict:
+    keys = [
+        {
+            "dedup_key": "topic_rate:/scan",
+            "rule": "topic_rate",
+            "verdict": "both",
+            "recorded_count": 1,
+            "replayed_count": 1,
+            "recorded_severity": "CRITICAL",
+            "replayed_severity": "CRITICAL",
+            "first_recorded_offset_s": 5.2,
+            "first_replayed_offset_s": 5.0,
+        }
+    ]
+    if missed:
+        keys.append(
+            {
+                "dedup_key": "high_cpu",
+                "rule": "high_cpu",
+                "verdict": "recorded_only",
+                "recorded_count": 1,
+                "replayed_count": 0,
+                "recorded_severity": "WARNING",
+                "replayed_severity": None,
+                "first_recorded_offset_s": 30.0,
+                "first_replayed_offset_s": None,
+            }
+        )
+    return {
+        "run": {"id": "r1", "robot_id": "robot-01", "software_version": "1.0"},
+        "batches": 40,
+        "overrides": {},
+        "keys": keys,
+        "caught": 1,
+        "missed": missed,
+        "new": 0,
+        "notes": [],
+    }
+
+
+def test_cli_redetect_sends_overrides_and_reports(capsys) -> None:
+    seen: list[tuple[str, str, dict]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((request.method, request.url.path, json.loads(request.content)))
+        return httpx.Response(200, json=redetect_result(missed=1))
+
+    t = httpx.MockTransport(handler)
+    argv = ["redetect", "r1", "--set", "cpu_high_pct=95", "--set", "topic_degraded_ratio=0.5"]
+    assert main(argv, t) == EXIT_OK
+    assert seen == [
+        ("POST", "/api/v1/runs/r1/redetect", {"cpu_high_pct": 95, "topic_degraded_ratio": 0.5})
+    ]
+    out = capsys.readouterr().out
+    assert "[CAUGHT] topic_rate:/scan" in out and "[MISSED] high_cpu" in out
+    assert "1 caught, 1 missed, 0 new" in out
+
+    assert main(["redetect", "r1", "--fail-on-missed"], t) == EXIT_FAILED
+    capsys.readouterr()
+    assert main(["redetect", "r1", "--fail-on-missed", "--json"], t) == EXIT_FAILED
+    assert json.loads(capsys.readouterr().out)["missed"] == 1
+
+
+def test_cli_redetect_passes_when_nothing_missed(capsys) -> None:
+    t = httpx.MockTransport(lambda r: httpx.Response(200, json=redetect_result()))
+    assert main(["redetect", "r1", "--fail-on-missed"], t) == EXIT_OK
+
+
+def test_cli_redetect_errors(capsys) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "missing" in request.url.path:
+            return httpx.Response(404, json={"detail": "not found"})
+        return httpx.Response(422, json={"detail": "cpu_high_pct too high"})
+
+    t = httpx.MockTransport(handler)
+    assert main(["redetect", "missing"], t) == EXIT_ERROR
+    assert "not found" in capsys.readouterr().err
+    assert main(["redetect", "r1", "--set", "cpu_high_pct=500"], t) == EXIT_ERROR
+    assert "cpu_high_pct too high" in capsys.readouterr().err
+    assert main(["redetect", "r1", "--set", "cpu_high_pct"], t) == EXIT_ERROR
+    assert "NAME=NUMBER" in capsys.readouterr().err
+    assert main(["redetect", "r1", "--set", "cpu_high_pct=lots"], t) == EXIT_ERROR

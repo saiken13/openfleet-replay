@@ -14,7 +14,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.db.models import RobotApiKey
 from app.domain.errors import DomainError
@@ -25,12 +25,14 @@ class KeysError(Exception):
     pass
 
 
-def _run[T](database_url: str, fn: Callable[[ApiKeyService], Awaitable[T]]) -> T:
+def run_db[T](database_url: str, fn: Callable[[AsyncSession], Awaitable[T]]) -> T:
+    """Run `fn` with a session on its own engine; domain/DB errors become KeysError."""
+
     async def go() -> T:
         engine = create_async_engine(database_url)
         try:
             async with async_sessionmaker(engine, expire_on_commit=False)() as session:
-                return await fn(ApiKeyService(session))
+                return await fn(session)
         finally:
             await engine.dispose()
 
@@ -40,6 +42,10 @@ def _run[T](database_url: str, fn: Callable[[ApiKeyService], Awaitable[T]]) -> T
         raise KeysError(exc.message) from exc
     except (OSError, SQLAlchemyError) as exc:
         raise KeysError(f"database error: {exc}") from exc
+
+
+def _run[T](database_url: str, fn: Callable[[ApiKeyService], Awaitable[T]]) -> T:
+    return run_db(database_url, lambda session: fn(ApiKeyService(session)))
 
 
 def _as_dict(row: RobotApiKey) -> dict[str, Any]:

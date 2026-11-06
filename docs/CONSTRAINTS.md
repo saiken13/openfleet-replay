@@ -25,6 +25,7 @@ These are rules we follow until we deliberately change them. To change one, expl
 - Don't silently change API contracts. A breaking change needs a DECISIONS entry and a version or migration note.
 - Write endpoints called by robots must be idempotent (safe to retry).
 - Write endpoints called by robots must require the robot's API key (`RobotAuth`) and check that the caller owns the robot or run (DECISIONS #021).
+- Every other endpoint needs a user: `dependencies=[VIEWER]` for reads, `Operator` for changes (DECISIONS #022). Public endpoints are an explicit list in `tests/test_user_auth.py`.
 
 ## Testing and honesty
 - Don't remove or weaken tests to make builds pass.

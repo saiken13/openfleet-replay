@@ -19,6 +19,8 @@ from typing import Any
 import httpx
 
 API = "http://localhost:8000/api/v1"
+# Reads need a user (DECISIONS #022): the public demo viewer token that compose seeds.
+AUTH = {"Authorization": "Bearer ofu_demo_viewer_public-not-secret"}
 ROBOT = "ros-test-01"
 COMPOSE = ["docker", "compose", "--profile", "ros"]
 
@@ -28,7 +30,7 @@ def sh(*args: str) -> None:
 
 
 def get(path: str) -> Any:
-    r = httpx.get(API + path, timeout=5)
+    r = httpx.get(API + path, timeout=5, headers=AUTH)
     r.raise_for_status()
     return r.json()
 

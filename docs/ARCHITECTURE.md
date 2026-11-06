@@ -17,7 +17,7 @@ flowchart LR
         S["Services<br/>(business logic, transactions)"]
         REP["Repositories<br/>(SQL)"]
         D["Detection engine<br/>(pure rules)"]
-        H["Realtime hub<br/>(in-process pub/sub)"]
+        H["Realtime hub<br/>(local pub/sub; Redis fan-out<br/>across replicas)"]
         SW["Sweeper<br/>(periodic task)"]
     end
 
@@ -52,8 +52,8 @@ The backend stores those summaries. It decides whether something is unhealthy an
 | **Repositories** (`backend/app/repositories/`) | All SQL for one aggregate (robots, runs, telemetry, events, incidents). Return ORM or domain objects. | Make business decisions. |
 | **Detection engine** (`backend/app/detection/`) | Pure functions: `RobotSnapshot → list[Finding]`. Topic-health classification lives here too. | Touch the DB, the clock, or the network (the caller passes in `now`). |
 | **Incident reconciler** (in `services/incident_service.py`) | Compares the current findings with open incidents and decides to open, escalate, or resolve. This is the stateful half of detection. | — |
-| **Sweeper** (`backend/app/workers/`) | Runs every `sweep_interval_s`. It catches problems that only show up as *missing* data: missing heartbeats, stale topics, abandoned runs. | Run more than once per process (see scaling limits). |
-| **Realtime hub** (`backend/app/realtime/`) | In-process pub/sub. Services publish *after commit*, and WebSocket connections subscribe. | Be the source of truth. If the browser reconnects, it reloads data over REST. |
+| **Sweeper** (`backend/app/workers/`) | Runs every `sweep_interval_s`. It catches problems that only show up as *missing* data: missing heartbeats, stale topics, abandoned runs. | Run a tick on two replicas at once: each tick takes a Postgres advisory lock (DECISIONS #024). |
+| **Realtime hub** (`backend/app/realtime/`) | Pub/sub: local delivery, plus Redis fan-out to other replicas when `REDIS_URL` is set (DECISIONS #025). Services publish *after commit*, and WebSocket connections subscribe. | Be the source of truth. If the browser reconnects, it reloads data over REST. |
 | **Replay** (`backend/app/replay/`) | Builds a run's ordered, merged event stream (read-only). Later it will also re-run detection rules over a recorded run. | Hold server-side playback state. Pacing happens in the client. |
 | **PostgreSQL** | Source of truth for identity, current state, time series, events, and incidents. Enforces idempotency and dedup with constraints. | Store large binary recordings. Those go to object storage in Phase 2+. |
 | **Frontend** (`frontend/`) | React + TS + Vite SPA. A single reducer turns events into dashboard state, and both **live** (WS) and **replay** (stream + client clock) feed that same reducer. | Compute health or incident logic itself. |
@@ -134,7 +134,7 @@ Models: `backend/app/db/models.py`. Migrations: `0001` (robots, runs) and `0002`
 5. Derive the robot's status.
 6. Commit, then publish to the hub.
 
-**Liveness:** every `SWEEP_INTERVAL_S`, the sweeper:
+**Liveness:** every `SWEEP_INTERVAL_S`, the sweeper (on whichever replica wins the tick's advisory lock, DECISIONS #024):
 - Re-evaluates robots that are not OFFLINE but whose `last_seen_at < now - HEARTBEAT_TIMEOUT_S`. This derives OFFLINE, and HeartbeatMissingRule fires if they were in a run (DECISIONS #019).
 - Aborts the current run of robots silent for longer than `RUN_ABANDON_AFTER_S`.
 
@@ -180,16 +180,17 @@ class Finding:
 - **Backend:** `GET /runs/{id}/stream` returns the run's samples, topic samples, and events merged into one list ordered by `(ts, kind, id)`, with cursor pagination. It's stateless and read-only.
 - **Frontend:** `frontend/src/replay/ReplayClock.ts` (play/pause/restart/seek, 1×–16×, incident markers on the scrubber) pulls the stream and dispatches frames into the **same reducer** (`frontend/src/state/robotReducer.ts`) the live WebSocket feeds, and both render `RobotView`. The dashboard can't tell live data from replay data, so we don't build two UIs.
 - Why the client paces the replay: the server keeps no per-viewer session state, seeking is trivial, and it scales like any read. A server-paced WS replay would need session lifecycle, backpressure, and cleanup, and the MVP doesn't need any of that.
-- **Not built yet: re-detection replay.** Feed a recorded run's snapshots through the *current* rule set to answer "would the new rules have caught this, and how much earlier?"
+- **Re-detection replay** (DECISIONS #023): `POST /runs/{id}/redetect` rebuilds the snapshot after each stored batch, runs the *current* rules (optionally with overridden thresholds), simulates the reconciler in robot time, and compares the result with the incidents recorded live: caught, missed, new, and how much earlier or later. It's pure (`app/detection/replay.py`) and read-only. The run page has a panel for it, and `openfleet redetect` is the CLI.
 
 ### What replay does *not* do (important)
-Replaying a *recording* doesn't run new robot software, so a recorded run always gives the same result. Regression testing of a new software version works by **producing a new run** (CI starts the simulator or ROS 2 sim with the new build) and then running `openfleet check` on it and comparing it with a baseline run. Re-running *robot software* against recorded sensor data (rosbag2/MCAP playback) is a Phase 3 capability.
+Replaying a *recording* doesn't run new robot software, so a recorded run always gives the same result. (Re-detection replays only the *detection*: new rules or thresholds over the same recorded data.) Regression testing of a new software version works by **producing a new run** (CI starts the simulator or ROS 2 sim with the new build) and then running `openfleet check` on it and comparing it with a baseline run. Re-running *robot software* against recorded sensor data (rosbag2/MCAP playback) is a Phase 3 capability.
 
 ## 8. Realtime
 
 - `WS /api/v1/ws/fleet`: `{"type": "robot"}` and `{"type": "incident"}` messages for every robot.
 - `WS /api/v1/ws/robots/{robot_id}`: the same plus `{"type": "frame", "data": Frame}`. A frame (`sample` | `topic` | `event`) has exactly the shape of a replay stream item.
 - Hub: `backend/app/realtime/hub.py`. Bounded per-subscriber queues; a slow client drops its oldest messages and never blocks ingest.
+- Across replicas (DECISIONS #025): `backend/app/realtime/bus.py` forwards every locally published message over Redis pub/sub, and the other replicas deliver it to their subscribers. Messages carry a per-instance sequence number (plus a heartbeat). When a replica sees a gap, or has just (re)subscribed, it closes its WebSockets with **1012** and clients reload over REST.
 - Services publish **after the transaction commits** (`Service.commit()` in `services/base.py` flushes an outbox), so the UI never shows data that could still roll back.
 - WS messages are hints. On connect or reconnect the client loads current state over REST, then applies deltas.
 
@@ -200,18 +201,31 @@ Replaying a *recording* doesn't run new robot software, so a recorded run always
 | Setting | Default | Meaning |
 |---|---|---|
 | `DATABASE_URL` | compose DB on `localhost:5433` | asyncpg URL |
+| `REDIS_URL` | unset (compose: `redis://redis:6379/0`) | realtime fan-out between replicas (#025); unset = in-process hub only |
 | `HEARTBEAT_TIMEOUT_S` | 10 | silence (server time) before a robot is not live |
 | `SWEEP_INTERVAL_S` / `SWEEPER_ENABLED` | 2 / true | sweeper cadence |
 | `RUN_ABANDON_AFTER_S` | 60 | silence before a RUNNING run is ABORTED |
 | `INCIDENT_RESOLVE_AFTER_S` | 10 | auto-resolve hysteresis |
 | `TIMELINE_LOOKBACK_S` | 60 | incident timeline lead-up window |
+| `REDETECT_MAX_SAMPLES` | 50000 | largest run (batches) re-detection will load (#023) |
 | `TOPIC_DEGRADED_RATIO` / `TOPIC_FAILED_RATIO` / `TOPIC_STALE_AFTER_S` | 0.7 / 0.1 / 3 | topic classification |
 | `CPU_HIGH_PCT` / `MEM_HIGH_PCT` | 90 / 90 | WARNING thresholds |
 | `BATTERY_LOW_PCT` / `BATTERY_CRITICAL_PCT` | 25 / 10 | WARNING / CRITICAL |
 | `CORS_ORIGINS` | `["http://localhost:5173"]` | dev server origin (nginx serves the UI same-origin in compose) |
 | `ROBOT_KEYS_FILE` | unset | JSON `{robot_id: key}` seeded at startup. Demo/dev only; compose sets it to the public `examples/demo-robot-keys.json` (DECISIONS #021) |
+| `USERS_FILE` | unset | JSON `{username: {password, role, token?}}` seeded at startup. Demo/dev only (`examples/demo-users.json`) |
+| `SESSION_TTL_S` / `COOKIE_SECURE` | 43200 / false | dashboard session lifetime (absolute); set `COOKIE_SECURE` behind HTTPS |
+| `LOGIN_HINT` | unset | text on the login page (compose: the demo credentials) |
+| `WS_REAUTH_INTERVAL_S` | 30 | how often an open WebSocket re-checks its session/token |
 
-Robot writes are authenticated with per-robot API keys (`Authorization: Bearer`). They're stored as SHA-256 in `robot_api_keys` and managed with `openfleet keys` (DECISIONS #021). Reads and WebSockets aren't authenticated yet.
+**Auth.** Two credential families:
+- **Robots** (DECISIONS #021) use per-robot API keys (`robot_api_keys`) on the writes.
+- **Users** (DECISIONS #022) use `users` and `user_tokens`:
+  - the dashboard's HttpOnly session cookie, or an API token as `Authorization: Bearer`;
+  - required on every read and WebSocket;
+  - roles VIEWER < OPERATOR, where triage needs OPERATOR.
+- All secrets are stored as SHA-256, and passwords with scrypt.
+- `tests/test_user_auth.py::test_every_api_route_requires_robot_or_user_auth` keeps new routes from shipping open.
 
 ## 10. Known scaling limits
 
@@ -219,7 +233,7 @@ These are expected to break first as the fleet grows. None of them is a problem 
 
 | Limit | Why | Evolution path |
 |---|---|---|
-| Single process: realtime hub + sweeper | The in-process hub can't fan out across replicas, and two sweepers would double-process | Redis pub/sub or NATS for fan-out; a Postgres advisory lock or a dedicated worker for the sweeper |
+| Every replica receives every realtime message | Redis fan-out (#025) uses one channel; fine for tens of replicas | Per-channel Redis subscriptions driven by local subscriber counts. (Multi-replica works today: the sweeper takes an advisory lock, #024, and needs a direct or session-pooled DB connection, not transaction-pooling PgBouncer.) |
 | Detection on the request path | Ingest latency includes rule evaluation | Move detection behind a queue (NATS/Kafka) and a worker pool; ingest just appends |
 | Time-series rows in plain Postgres | Write volume and table size grow linearly with robots × rate | Batch inserts → time partitioning / TimescaleDB → retention and downsampling policies |
 | `robots` row updated on every batch | Hot-row updates | Update `last_seen_at` at most every N seconds, or move liveness to Redis |
