@@ -1,8 +1,10 @@
 """openfleet: command-line client for OpenFleet Replay.
 
     openfleet check RUN_ID --config regression.yaml [--baseline RUN_ID] [--api URL] [--json]
+    openfleet keys create ROBOT_ID [--label TEXT] | keys list [--robot ID] | keys revoke KEY_ID
 
-Exit codes: 0 all checks passed, 1 a check failed, 2 usage/config/API error.
+Exit codes: 0 all checks passed (or a keys command succeeded), 1 a check failed,
+2 usage/config/API/database error.
 """
 
 import argparse
@@ -17,6 +19,7 @@ import httpx
 import yaml
 from pydantic import ValidationError
 
+from openfleet_cli import keys
 from openfleet_cli.checks import CheckConfig, CheckResult, evaluate
 
 EXIT_OK, EXIT_FAILED, EXIT_ERROR = 0, 1, 2
@@ -87,7 +90,21 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--baseline", help="baseline run id to compare against")
     c.add_argument("--json", action="store_true", help="machine-readable output")
     c.set_defaults(func=cmd_check)
+    keys.add_parser(sub, _default_database_url()).set_defaults(func=cmd_keys)
     return p
+
+
+def _default_database_url() -> str:
+    from app.core.config import Settings
+
+    return Settings().database_url  # OPENFLEET_DATABASE_URL, else the local-dev default
+
+
+def cmd_keys(args: argparse.Namespace, transport: httpx.BaseTransport | None = None) -> int:
+    try:
+        return args.keys_func(args)
+    except keys.KeysError as exc:
+        raise CliError(str(exc)) from exc
 
 
 def main(argv: list[str] | None = None, transport: httpx.BaseTransport | None = None) -> int:

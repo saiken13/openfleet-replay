@@ -25,6 +25,13 @@ def main(argv: list[str] | None = None) -> int:
     cfg = load_config(args.config)
     if args.api:
         cfg.api_url = args.api
+    if not cfg.api_key:
+        print(
+            "error: no robot API key. Set OPENFLEET_API_KEY (or api_key in the config); "
+            f"issue one with `openfleet keys create {cfg.robot_id}`.",
+            file=sys.stderr,
+        )
+        return 2
 
     try:
         from openfleet_collector.node import spin
@@ -39,6 +46,7 @@ def main(argv: list[str] | None = None) -> int:
     uplink = Uplink(
         cfg.api_url,
         cfg.robot_id,
+        api_key=cfg.api_key,
         robot_name=cfg.robot_name,
         robot_model=cfg.robot_model,
         software_version=cfg.software_version,

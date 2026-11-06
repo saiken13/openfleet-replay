@@ -1,0 +1,12 @@
+{
+  "amr-01": "ofk_demo_amr-01_public-not-secret",
+  "amr-02": "ofk_demo_amr-02_public-not-secret",
+  "amr-03": "ofk_demo_amr-03_public-not-secret",
+  "amr-04": "ofk_demo_amr-04_public-not-secret",
+  "amr-05": "ofk_demo_amr-05_public-not-secret",
+  "amr-06": "ofk_demo_amr-06_public-not-secret",
+  "amr-07": "ofk_demo_amr-07_public-not-secret",
+  "amr-08": "ofk_demo_amr-08_public-not-secret",
+  "ci-01": "ofk_demo_ci-01_public-not-secret",
+  "ros-test-01": "ofk_demo_ros-test-01_public-not-secret"
+}

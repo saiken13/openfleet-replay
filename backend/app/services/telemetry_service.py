@@ -14,7 +14,7 @@ from app.domain.enums import (
     RunStatus,
     TopicStatus,
 )
-from app.domain.errors import ConflictError, NotFoundError
+from app.domain.errors import ConflictError, ForbiddenError, NotFoundError
 from app.realtime.hub import Hub
 from app.repositories.robot_repository import RobotRepository
 from app.repositories.run_repository import RunRepository
@@ -55,14 +55,24 @@ class TelemetryService(Service):
         self.telemetry = TelemetryRepository(session)
         self.states = StateRepository(session)
 
-    async def ingest(self, run_id: uuid.UUID, batch: TelemetryBatch, now: datetime) -> bool:
+    async def ingest(
+        self,
+        run_id: uuid.UUID,
+        batch: TelemetryBatch,
+        now: datetime,
+        *,
+        caller_robot_id: str | None = None,
+    ) -> bool:
         """Store one batch; returns False if it was a duplicate (idempotent retry).
 
         One transaction: samples, current state, change events, liveness, then detection.
+        `caller_robot_id`, when given, must own the run (the API always passes it).
         """
         unlocked = await self.runs.get(run_id)
         if unlocked is None:
             raise NotFoundError(f"run {run_id} not found")
+        if caller_robot_id is not None and unlocked.robot_id != caller_robot_id:
+            raise ForbiddenError(f"run {run_id} belongs to another robot")
         robot = await self.robots.get(unlocked.robot_id, for_update=True)  # robot -> run order
         run = await self.runs.get(run_id)
         assert robot is not None and run is not None

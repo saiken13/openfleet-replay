@@ -3,6 +3,8 @@
 openfleet-sim --scenario scenarios/demo.yaml                 # real time
 openfleet-sim --scenario scenarios/demo.yaml --fast          # as fast as possible (CI)
 openfleet-sim --scenario scenarios/demo.yaml --loop          # repeat forever (demo)
+
+Robot API keys come from --keys FILE or OPENFLEET_ROBOT_KEYS_FILE (JSON robot_id -> key).
 """
 
 import argparse
@@ -17,7 +19,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from openfleet_sim.client import ApiError, FleetApi
+from openfleet_sim.client import ApiError, FleetApi, load_keys
 from openfleet_sim.robot import SimRobot
 from openfleet_sim.scenario import OfflineFailure, Scenario, load_scenario
 
@@ -107,7 +109,16 @@ async def amain(args: argparse.Namespace) -> int:
         sc.fleet.count = args.robots
     if args.duration:
         sc.duration_s = args.duration
-    api = FleetApi(args.api)
+    try:
+        keys = load_keys(args.keys)
+    except ApiError as exc:
+        log.error("%s", exc)
+        return 2
+    missing = [rid for rid in sc.robot_ids() if rid not in keys]
+    if missing:
+        log.error("no API key for robot(s) %s in %s", ", ".join(missing), args.keys)
+        return 2
+    api = FleetApi(args.api, keys)
     # `docker compose stop` sends SIGTERM. As PID 1 with no handler, Python would ignore it
     # and Docker would SIGKILL us after the grace period (exit 137), leaving runs RUNNING.
     loop = asyncio.get_running_loop()
@@ -145,6 +156,11 @@ def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="openfleet-sim", description=__doc__.split("\n")[0])
     p.add_argument("--api", default=os.environ.get("OPENFLEET_API", "http://localhost:8000"))
     p.add_argument("--scenario", "-s", required=True)
+    p.add_argument(
+        "--keys",
+        default=os.environ.get("OPENFLEET_ROBOT_KEYS_FILE"),
+        help="JSON robot_id -> API key (env OPENFLEET_ROBOT_KEYS_FILE)",
+    )
     p.add_argument("--speed", type=float, default=1.0, help="time multiplier (real-time mode)")
     p.add_argument("--fast", action="store_true", help="send batches as fast as possible")
     p.add_argument("--loop", action="store_true", help="repeat the scenario forever")

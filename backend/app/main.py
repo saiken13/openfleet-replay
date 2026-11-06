@@ -1,11 +1,13 @@
 import asyncio
 import contextlib
+import json
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.api.errors import register_error_handlers
 from app.api.v1.router import api_router
@@ -13,7 +15,30 @@ from app.core.config import Settings, get_settings
 from app.db.engine import build_engine
 from app.db.session import build_sessionmaker
 from app.realtime.hub import Hub
+from app.services.api_key_service import ApiKeyService
 from app.workers.sweeper import Sweeper
+
+log = logging.getLogger(__name__)
+
+
+async def seed_robot_keys(
+    settings: Settings, sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    if settings.robot_keys_file is None:
+        return
+    keys = json.loads(settings.robot_keys_file.read_text())
+    if not isinstance(keys, dict) or not all(
+        isinstance(k, str) and isinstance(v, str) for k, v in keys.items()
+    ):
+        raise ValueError(f"{settings.robot_keys_file}: expected a JSON object of robot_id -> key")
+    async with sessionmaker() as session:
+        inserted = await ApiKeyService(session).seed(keys)
+    log.warning(
+        "seeded robot API keys from %s (%d new, %d total). Demo/dev only.",
+        settings.robot_keys_file,
+        inserted,
+        len(keys),
+    )
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -26,6 +51,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.engine = build_engine(settings)
         app.state.sessionmaker = build_sessionmaker(app.state.engine)
         app.state.hub = Hub()
+        await seed_robot_keys(settings, app.state.sessionmaker)
         app.state.sweeper = Sweeper(app.state.sessionmaker, app.state.hub, settings)
         task = (
             asyncio.create_task(app.state.sweeper.run_forever())

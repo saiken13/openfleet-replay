@@ -3,6 +3,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Query, Response, status
 
+from app.api.auth import UNAUTHORIZED, RobotAuth, require_robot
 from app.api.deps import HubDep, NowDep, SessionDep, SettingsDep
 from app.schemas.analysis import RunComparison, RunStream, RunSummary
 from app.schemas.robot import ROBOT_ID_PATTERN
@@ -48,6 +49,7 @@ async def compare_runs(base: uuid.UUID, candidate: uuid.UUID, session: SessionDe
         201: {"model": RunRead, "description": "Run created"},
         404: {"description": "Robot not found"},
         409: {"description": "Run id already used for another robot or with different values"},
+        **UNAUTHORIZED,
     },
     summary="Start a run (idempotent; the client generates the UUID)",
 )
@@ -59,7 +61,9 @@ async def start_run(
     hub: HubDep,
     settings: SettingsDep,
     now: NowDep,
+    caller: RobotAuth,
 ) -> RunRead:
+    require_robot(caller, body.robot_id)
     result = await RunService(session, hub, settings).start(
         run_id, body.robot_id, body.software_version, body.started_at, now
     )
@@ -74,6 +78,7 @@ async def start_run(
         **RUN_NOT_FOUND,
         409: {"description": "Run already ended with a different status"},
         422: {"description": "Invalid body, or ended_at before started_at"},
+        **UNAUTHORIZED,
     },
     summary="End a run (RUNNING -> SUCCESS | FAILED | ABORTED; retry-safe)",
 )
@@ -84,15 +89,18 @@ async def end_run(
     hub: HubDep,
     settings: SettingsDep,
     now: NowDep,
+    caller: RobotAuth,
 ) -> RunRead:
-    run = await RunService(session, hub, settings).end(run_id, body.status, body.ended_at, now)
+    run = await RunService(session, hub, settings).end(
+        run_id, body.status, body.ended_at, now, caller_robot_id=caller
+    )
     return RunRead.model_validate(run)
 
 
 @router.post(
     "/{run_id}/telemetry",
     response_model=IngestResult,
-    responses={**RUN_NOT_FOUND, 409: {"description": "Run is not RUNNING"}},
+    responses={**RUN_NOT_FOUND, 409: {"description": "Run is not RUNNING"}, **UNAUTHORIZED},
     summary="Ingest one aggregated telemetry batch (idempotent on seq)",
 )
 async def ingest_telemetry(
@@ -102,8 +110,11 @@ async def ingest_telemetry(
     hub: HubDep,
     settings: SettingsDep,
     now: NowDep,
+    caller: RobotAuth,
 ) -> IngestResult:
-    accepted = await TelemetryService(session, hub, settings).ingest(run_id, body, now)
+    accepted = await TelemetryService(session, hub, settings).ingest(
+        run_id, body, now, caller_robot_id=caller
+    )
     return IngestResult(accepted=True, duplicate=not accepted)
 
 

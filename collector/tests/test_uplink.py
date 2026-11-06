@@ -11,6 +11,8 @@ class FakeServer:
     def __init__(self) -> None:
         self.down = False
         self.telemetry_status = 200  # status to return for telemetry
+        self.write_status = 0  # if set, every request gets this status (e.g. 401)
+        self.auth: list[str | None] = []
         self.calls: list[tuple[str, str, dict]] = []
         self.runs: list[str] = []
         self.received: list[tuple[str, int]] = []  # (run_id, seq)
@@ -21,6 +23,9 @@ class FakeServer:
         body = json.loads(req.content) if req.content else {}
         path = req.url.path
         self.calls.append((req.method, path, body))
+        self.auth.append(req.headers.get("Authorization"))
+        if self.write_status:
+            return httpx.Response(self.write_status, json={"detail": "bad key"})
         if req.method == "PUT" and path.startswith("/api/v1/runs/"):
             self.runs.append(path.rsplit("/", 1)[1])
             return httpx.Response(201, json={})
@@ -187,3 +192,55 @@ def test_batches_before_start_are_ignored() -> None:
     u = make(srv)
     u.enqueue({"seq": 0, "ts": "x"})
     assert u.pending() == 0
+
+
+def test_every_request_carries_the_api_key() -> None:
+    srv = FakeServer()
+    u = make(srv, api_key="ofk_test")
+    u.start()
+    u.enqueue(batch(u))
+    drain(u)
+    u.end()
+    assert len(srv.auth) == 4 and set(srv.auth) == {"Bearer ofk_test"}
+
+
+def test_rejected_key_keeps_retrying_start() -> None:
+    srv = FakeServer()
+    srv.write_status = 401
+    u = make(srv, api_key="wrong")
+    attempts = 0
+
+    def sleep(_: float) -> None:  # the operator issues the key after a few retries
+        nonlocal attempts
+        attempts += 1
+        if attempts == 3:
+            srv.write_status = 0
+
+    u.sleep = sleep
+    u.start()
+    assert attempts == 3 and u.run_id is not None
+
+
+def test_rejected_key_buffers_batches_instead_of_dropping() -> None:
+    srv = FakeServer()
+    u = make(srv, api_key="k")
+    u.start()
+    u.enqueue(batch(u))
+    u.enqueue(batch(u))
+    srv.telemetry_status = 403
+    assert u.pump() is False
+    assert u.pending() == 2 and u.dropped == 0
+    srv.telemetry_status = 200
+    drain(u)
+    assert [seq for _, seq in srv.received] == [0, 1] and u.dropped == 0
+
+
+def test_api_key_from_environment_overrides_config(tmp_path, monkeypatch) -> None:
+    from openfleet_collector.config import load_config
+
+    path = tmp_path / "c.yaml"
+    path.write_text("robot_id: r1\napi_key: from-file\n")
+    monkeypatch.delenv("OPENFLEET_API_KEY", raising=False)
+    assert load_config(path).api_key == "from-file"
+    monkeypatch.setenv("OPENFLEET_API_KEY", "from-env")
+    assert load_config(path).api_key == "from-env"

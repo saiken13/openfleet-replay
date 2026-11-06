@@ -1,3 +1,9 @@
+# Robot API keys (DECISIONS #021): this local stack seeds the PUBLIC demo keys in
+# examples/demo-robot-keys.json so the demo, CI and the ROS e2e need zero setup. Never use
+# them on a reachable deployment: drop OPENFLEET_ROBOT_KEYS_FILE and issue real keys with
+#   docker compose exec backend openfleet keys create ROBOT_ID
+x-demo-keys: &demo-keys ./examples/demo-robot-keys.json:/etc/openfleet/demo-robot-keys.json:ro
+
 services:
   postgres:
     image: postgres:16
@@ -20,6 +26,9 @@ services:
     environment:
       OPENFLEET_DATABASE_URL: postgresql+asyncpg://openfleet:openfleet@postgres:5432/openfleet
       OPENFLEET_CORS_ORIGINS: '["http://localhost:5173", "http://localhost:8080"]'
+      OPENFLEET_ROBOT_KEYS_FILE: /etc/openfleet/demo-robot-keys.json
+    volumes:
+      - *demo-keys
     ports:
       - "8000:8000"
     depends_on:
@@ -46,6 +55,9 @@ services:
     profiles: [demo]
     environment:
       OPENFLEET_API: http://backend:8000
+      OPENFLEET_ROBOT_KEYS_FILE: /etc/openfleet/demo-robot-keys.json
+    volumes:
+      - *demo-keys
     command: ["openfleet-sim", "--scenario", "scenarios/demo.yaml", "--loop"]
     depends_on:
       backend:

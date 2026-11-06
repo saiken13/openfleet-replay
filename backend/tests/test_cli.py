@@ -147,3 +147,65 @@ def test_cli_json_output_with_baseline(cfg_file: Path, capsys) -> None:
     payload = json.loads(capsys.readouterr().out)
     assert payload["run_id"] == "cand"
     assert [r["passed"] for r in payload["results"]] == [False, True]  # /scan dropped, /odom ok
+
+
+# --- openfleet keys (real commits: ids are prefixed "concurrency-" and purged) ----------
+
+
+def _purge_cli_robots(url: str) -> None:
+    import asyncio
+
+    from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+
+    from tests.conftest import purge_robots
+
+    async def go() -> None:
+        engine = create_async_engine(url)
+        try:
+            async with AsyncSession(engine) as s:
+                await purge_robots(s, "concurrency-cli-")
+                await s.commit()
+        finally:
+            await engine.dispose()
+
+    asyncio.run(go())
+
+
+@pytest.fixture
+def keys_db(migrated_database: str):
+    _purge_cli_robots(migrated_database)
+    yield ["keys", "--database-url", migrated_database]
+    _purge_cli_robots(migrated_database)
+
+
+def test_keys_create_list_revoke(keys_db: list[str], capsys) -> None:
+    assert main([*keys_db, "create", "concurrency-cli-01", "--label", "bench"]) == EXIT_OK
+    captured = capsys.readouterr()
+    key = captured.out.strip()
+    assert key.startswith("ofk_") and "\n" not in key  # stdout is just the key
+    assert "cannot be shown again" in captured.err
+
+    assert main([*keys_db, "list", "--robot", "concurrency-cli-01", "--json"]) == EXIT_OK
+    [row] = json.loads(capsys.readouterr().out)
+    assert row["robot_id"] == "concurrency-cli-01" and row["label"] == "bench"
+    assert row["revoked_at"] is None and key.startswith(row["prefix"])
+    assert key not in json.dumps(row)
+
+    assert main([*keys_db, "list", "--robot", "concurrency-cli-01"]) == EXIT_OK
+    assert "active" in capsys.readouterr().out
+
+    assert main([*keys_db, "revoke", row["id"]]) == EXIT_OK
+    assert f"revoked key {row['id']}" in capsys.readouterr().out
+    assert main([*keys_db, "list", "--robot", "concurrency-cli-01", "--json"]) == EXIT_OK
+    assert json.loads(capsys.readouterr().out)[0]["revoked_at"] is not None
+
+
+def test_keys_errors_exit_2(keys_db: list[str], capsys) -> None:
+    assert main([*keys_db, "create", "bad id!"]) == EXIT_ERROR
+    assert "invalid robot id" in capsys.readouterr().err
+    assert main([*keys_db, "revoke", "not-a-uuid"]) == EXIT_ERROR
+    assert main([*keys_db, "revoke", "00000000-0000-0000-0000-000000000000"]) == EXIT_ERROR
+    assert "not found" in capsys.readouterr().err
+    unreachable = ["keys", "--database-url", "postgresql+asyncpg://x:y@127.0.0.1:1/none"]
+    assert main([*unreachable, "list"]) == EXIT_ERROR
+    assert "database error" in capsys.readouterr().err

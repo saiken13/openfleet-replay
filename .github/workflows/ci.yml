@@ -117,9 +117,9 @@ jobs:
       - run: docker compose up -d --build --wait postgres backend
       - run: pip install -e backend -e simulator
       - name: Healthy baseline run
-        run: openfleet-sim -s simulator/scenarios/healthy.yaml --fast -o base.json
+        run: openfleet-sim -s simulator/scenarios/healthy.yaml --fast -o base.json --keys examples/demo-robot-keys.json
       - name: Regression candidate run
-        run: openfleet-sim -s simulator/scenarios/lidar_regression.yaml --fast -o cand.json
+        run: openfleet-sim -s simulator/scenarios/lidar_regression.yaml --fast -o cand.json --keys examples/demo-robot-keys.json
       - name: Baseline passes the regression config
         run: openfleet check "$(jq -r '.[0].run_id' base.json)" -c examples/regression.yaml
       - name: Regression is caught (expects exit code 1)

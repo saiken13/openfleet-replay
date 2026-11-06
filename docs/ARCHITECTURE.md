@@ -209,6 +209,9 @@ Replaying a *recording* doesn't run new robot software, so a recorded run always
 | `CPU_HIGH_PCT` / `MEM_HIGH_PCT` | 90 / 90 | WARNING thresholds |
 | `BATTERY_LOW_PCT` / `BATTERY_CRITICAL_PCT` | 25 / 10 | WARNING / CRITICAL |
 | `CORS_ORIGINS` | `["http://localhost:5173"]` | dev server origin (nginx serves the UI same-origin in compose) |
+| `ROBOT_KEYS_FILE` | unset | JSON `{robot_id: key}` seeded at startup. Demo/dev only; compose sets it to the public `examples/demo-robot-keys.json` (DECISIONS #021) |
+
+Robot writes are authenticated with per-robot API keys (`Authorization: Bearer`). They're stored as SHA-256 in `robot_api_keys` and managed with `openfleet keys` (DECISIONS #021). Reads and WebSockets aren't authenticated yet.
 
 ## 10. Known scaling limits
 

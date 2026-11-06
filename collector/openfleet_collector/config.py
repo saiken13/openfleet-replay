@@ -1,5 +1,6 @@
 """Collector configuration (YAML). Example: collector/collector.example.yaml."""
 
+import os
 from pathlib import Path
 from typing import Literal
 
@@ -12,6 +13,9 @@ class CollectorConfig(BaseModel):
 
     api_url: str = "http://localhost:8000"
     robot_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+    # This robot's key (`openfleet keys create ROBOT_ID`). Prefer the OPENFLEET_API_KEY
+    # environment variable, which overrides this, to keep the secret out of the file.
+    api_key: str | None = None
     robot_name: str | None = None
     robot_model: str | None = None
     software_version: str | None = None
@@ -35,4 +39,7 @@ class CollectorConfig(BaseModel):
 
 
 def load_config(path: str | Path) -> CollectorConfig:
-    return CollectorConfig.model_validate(yaml.safe_load(Path(path).read_text()) or {})
+    cfg = CollectorConfig.model_validate(yaml.safe_load(Path(path).read_text()) or {})
+    if os.environ.get("OPENFLEET_API_KEY"):
+        cfg.api_key = os.environ["OPENFLEET_API_KEY"]
+    return cfg

@@ -212,3 +212,21 @@ class Incident(Base):
     resolved_at: Mapped[datetime | None] = mapped_column(TZ)
     created_at: Mapped[datetime] = mapped_column(TZ, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(TZ, server_default=func.now())
+
+
+class RobotApiKey(Base):
+    """A robot's credential for the write endpoints. Only the SHA-256 of the key is stored;
+    the key itself is shown once, when it is issued (DECISIONS #021). A robot may hold
+    several active keys at once, which is how keys are rotated."""
+
+    __tablename__ = "robot_api_keys"
+    __table_args__ = (Index("ix_robot_api_keys_robot_id", "robot_id"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    # No FK to robots: a key is issued before the robot first registers (registration needs it).
+    robot_id: Mapped[str] = mapped_column(Text)
+    key_hash: Mapped[str] = mapped_column(Text, unique=True)  # sha256 hex of the full key
+    prefix: Mapped[str] = mapped_column(Text)  # first characters of the key, for display only
+    label: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(TZ, server_default=func.now())
+    revoked_at: Mapped[datetime | None] = mapped_column(TZ)

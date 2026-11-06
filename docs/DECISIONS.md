@@ -202,3 +202,35 @@ Both showed up in the first end-to-end demo.
 - /rosout lines logged in the first moment after a node starts can be missed before discovery completes.
 - The node graph shows presence, not health. A node that is alive but wedged shows up as a stale topic rate instead.
 **Date:** 2026-11-06
+
+## 021 — Robot authentication: per-robot API keys on the write endpoints
+**Status:** Accepted (2026-11-05). Step 1 of auth; dashboard/read auth and WebSocket auth come next.
+**Decision:**
+- **Credential:** each robot holds one or more API keys and sends `Authorization: Bearer <key>` on the five robot-facing writes: register, heartbeat, run start, run end, and telemetry.
+  - A missing, unknown or revoked key gets **401** (with `WWW-Authenticate: Bearer`). Auth runs before body validation, so an anonymous caller learns nothing about the request.
+  - A valid key used for another robot gets **403**: another robot's id in the path, or `robot_id` in the run-start body, or another robot's run for end and telemetry. The ownership check for runs sits in the services (`caller_robot_id`), next to the run lookup it needs.
+  - An unknown run with a valid key is still a 404.
+- **Storage:** table `robot_api_keys` (migration 0003) stores `sha256(key)` with a unique index, plus a short display prefix, a label and `revoked_at`. The key itself is shown once, when it is issued.
+  - There's no FK to `robots`, because a key must exist before the robot's first registration.
+  - Several active keys per robot are allowed. That's how keys are rotated: issue the new key, deploy it, revoke the old one.
+- **Issuing keys:** `openfleet keys create|list|revoke`. It talks to the database directly (`OPENFLEET_DATABASE_URL`), e.g. `docker compose exec backend openfleet keys create amr-05`. There's no admin HTTP endpoint and no extra admin secret.
+- **Zero-setup demo:** `OPENFLEET_ROBOT_KEYS_FILE` points the backend at a JSON file of `{robot_id: key}`, which it seeds idempotently at startup. Seeding never un-revokes a key, and a key already issued to another robot is a startup error.
+  - Compose seeds the **public** `examples/demo-robot-keys.json`, and the simulator (`--keys` / `OPENFLEET_ROBOT_KEYS_FILE`) and the ROS e2e config use the same file.
+  - A test asserts that it covers every bundled scenario robot.
+- **Clients:**
+  - The simulator signs each request with that robot's key and refuses to start if a scenario robot has none.
+  - The collector takes `api_key`, or `OPENFLEET_API_KEY`, which overrides it. On 401/403 it keeps batches buffered and retries with backoff instead of dropping them, so a key fixed on the server side recovers without data loss, within the buffer bound.
+**Why:**
+- Without auth, anyone who can reach the API can impersonate any robot, inject incidents, or end runs. Robot writes are the most exposed surface, and they're step 1.
+- Keys are 256-bit random tokens (`ofk_` + 43 chars), so a single SHA-256 is safe. There is nothing to brute-force, and unlike bcrypt/argon2 it can be looked up by index on the 1 Hz ingest path. It costs one indexed SELECT per request.
+- Issuing keys through direct DB access needs no bootstrap admin credential. Whoever can reach the database already controls everything.
+**Alternatives considered:**
+- Trust-on-first-use (registration returns a key): anyone can claim any unclaimed robot id.
+- A fleet-wide shared key: one leaked robot compromises the fleet, and it can't be revoked per robot.
+- mTLS: the strongest option, but heavy for robots behind NAT and for the zero-setup demo. Still possible later at the proxy layer.
+- JWTs: they add expiry and signing-key management, but keys are long-lived machine credentials anyway, and revocation would still need a server-side lookup.
+**Tradeoffs and migration:**
+- **Breaking API change:** existing robots must be given a key (`openfleet keys create ROBOT_ID`) and configured with it before upgrading. Reads (dashboard, `openfleet check`) stay open until step 2.
+- The demo keys are public. Any deployment reachable by others must drop `OPENFLEET_ROBOT_KEYS_FILE` and revoke the seeded keys.
+- There's no `last_used_at` tracking, to keep the ingest path read-only on the key table.
+**Date:** 2026-11-05

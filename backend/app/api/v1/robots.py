@@ -2,6 +2,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Path, Query, Response, status
 
+from app.api.auth import UNAUTHORIZED, RobotAuth, require_robot
 from app.api.deps import HubDep, NowDep, SessionDep, SettingsDep
 from app.schemas.robot import ROBOT_ID_PATTERN, RobotRead, RobotRegister
 from app.schemas.run import RunPage, RunRead
@@ -31,12 +32,18 @@ async def list_robots(session: SessionDep) -> list[RobotRead]:
 @router.put(
     "/{robot_id}",
     response_model=RobotRead,
-    responses={201: {"model": RobotRead, "description": "Robot created"}},
+    responses={201: {"model": RobotRead, "description": "Robot created"}, **UNAUTHORIZED},
     summary="Register a robot (idempotent upsert of identity fields)",
 )
 async def register_robot(
-    robot_id: RobotId, body: RobotRegister, response: Response, session: SessionDep, hub: HubDep
+    robot_id: RobotId,
+    body: RobotRegister,
+    response: Response,
+    session: SessionDep,
+    hub: HubDep,
+    caller: RobotAuth,
 ) -> RobotRead:
+    require_robot(caller, robot_id)
     result = await RobotService(session, hub).register(robot_id, body.name, body.model)
     response.status_code = status.HTTP_201_CREATED if result.created else status.HTTP_200_OK
     return RobotRead.model_validate(result.robot)
@@ -50,7 +57,7 @@ async def get_robot(robot_id: RobotId, session: SessionDep) -> RobotRead:
 @router.post(
     "/{robot_id}/heartbeat",
     status_code=status.HTTP_204_NO_CONTENT,
-    responses=NOT_FOUND,
+    responses={**NOT_FOUND, **UNAUTHORIZED},
     summary="Liveness signal (server time is what counts)",
 )
 async def heartbeat(
@@ -60,7 +67,9 @@ async def heartbeat(
     hub: HubDep,
     settings: SettingsDep,
     now: NowDep,
+    caller: RobotAuth,
 ) -> Response:
+    require_robot(caller, robot_id)
     await LivenessService(session, hub, settings).heartbeat(
         robot_id, body.ts, body.software_version, now
     )

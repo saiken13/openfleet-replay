@@ -1,4 +1,5 @@
 from functools import lru_cache
+from pathlib import Path
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -15,6 +16,10 @@ class Settings(BaseSettings):
     db_connect_timeout_s: float = 3.0
     log_level: str = "INFO"
     cors_origins: list[str] = ["http://localhost:5173"]
+
+    # Auth (DECISIONS #021). Optional JSON file {robot_id: api_key} seeded at startup, for
+    # demo/dev setups only; real deployments issue keys with `openfleet keys create`.
+    robot_keys_file: Path | None = None
 
     # Liveness (server time, DECISIONS #010)
     heartbeat_timeout_s: float = Field(10.0, gt=0)

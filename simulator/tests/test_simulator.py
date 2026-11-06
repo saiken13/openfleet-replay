@@ -7,7 +7,7 @@ import pytest
 from pydantic import ValidationError
 
 from openfleet_sim.client import ApiError, FleetApi
-from openfleet_sim.main import run_scenario
+from openfleet_sim.main import main, run_scenario
 from openfleet_sim.robot import SimRobot
 from openfleet_sim.scenario import Scenario, load_scenario
 
@@ -89,6 +89,7 @@ class FakeApi:
 
     def __init__(self, fail_first: int = 0) -> None:
         self.calls: list[tuple[str, str, dict]] = []
+        self.auth: list[tuple[str, str | None]] = []  # (path, Authorization header)
         self.fail_first = fail_first
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
@@ -97,6 +98,7 @@ class FakeApi:
             return httpx.Response(503)
         body = json.loads(request.content) if request.content else {}
         self.calls.append((request.method, request.url.path, body))
+        self.auth.append((request.url.path, request.headers.get("Authorization")))
         if request.url.path.endswith("/health"):
             return httpx.Response(200, json={"status": "ok"})
         return httpx.Response(200, json={})
@@ -151,3 +153,39 @@ async def test_cancellation_ends_open_runs_as_aborted() -> None:
     assert len(ends) == 2
     assert {b["status"] for _, b in ends} == {"ABORTED"}
     assert any(p.endswith("/telemetry") for _, p, _ in fake.calls)
+
+
+async def test_each_request_is_signed_with_its_own_robots_key() -> None:
+    fake = FakeApi()
+    keys = {"amr-01": "key-for-amr-01-xxxx", "amr-02": "key-for-amr-02-xxxx"}
+    api = FleetApi("http://api", keys, transport=httpx.MockTransport(fake), backoff_s=0)
+    sc = Scenario.model_validate({"name": "t", "duration_s": 3, "fleet": {"count": 2}})
+    runs = await run_scenario(api, sc, fast=True)
+
+    run_robot = {r["run_id"]: r["robot_id"] for r in runs}
+    assert len(fake.auth) == 2 + 2 + 6 + 2  # register, start, telemetry, end
+    for path, header in fake.auth:
+        parts = path.split("/")  # /api/v1/{robots|runs}/{id}/...
+        robot_id = parts[4] if parts[3] == "robots" else run_robot[parts[4]]
+        assert header == f"Bearer {keys[robot_id]}", path
+
+
+def test_main_requires_a_key_for_every_robot(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.delenv("OPENFLEET_ROBOT_KEYS_FILE", raising=False)
+    scenario = str(SCENARIOS / "demo.yaml")
+    assert main(["-s", scenario, "--api", "http://127.0.0.1:1"]) == 2  # no keys at all
+
+    partial = tmp_path / "keys.json"
+    partial.write_text(json.dumps({"amr-01": "key-for-amr-01-xxxx"}))
+    assert main(["-s", scenario, "--keys", str(partial), "--api", "http://127.0.0.1:1"]) == 2
+
+    partial.write_text("[1, 2]")
+    assert main(["-s", scenario, "--keys", str(partial), "--api", "http://127.0.0.1:1"]) == 2
+
+
+def test_bundled_demo_keys_cover_every_scenario() -> None:
+    from openfleet_sim.client import load_keys
+
+    keys = load_keys(str(SCENARIOS.parents[1] / "examples" / "demo-robot-keys.json"))
+    for path in SCENARIOS.glob("*.yaml"):
+        assert set(load_scenario(path).robot_ids()) <= set(keys), path.name

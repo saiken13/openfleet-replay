@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import Settings, get_settings
 from app.db.models import Robot, Run
 from app.domain.enums import EventSeverity, EventType, RunStatus
-from app.domain.errors import ConflictError, InvalidRequestError, NotFoundError
+from app.domain.errors import ConflictError, ForbiddenError, InvalidRequestError, NotFoundError
 from app.realtime.hub import Hub
 from app.repositories.robot_repository import RobotRepository
 from app.repositories.run_repository import RunRepository
@@ -89,13 +89,18 @@ class RunService(Service):
         status: RunStatus,
         ended_at: datetime,
         now: datetime | None = None,
+        *,
+        caller_robot_id: str | None = None,
     ) -> Run:
-        """RUNNING -> terminal. Repeating the same terminal status is a harmless retry."""
+        """RUNNING -> terminal. Repeating the same terminal status is a harmless retry.
+        `caller_robot_id`, when given, must own the run (the API always passes it)."""
         if status == RunStatus.RUNNING:
             raise InvalidRequestError("a run can only be ended with a terminal status")
         unlocked = await self.runs.get(run_id)
         if unlocked is None:
             raise NotFoundError(f"run {run_id} not found")
+        if caller_robot_id is not None and unlocked.robot_id != caller_robot_id:
+            raise ForbiddenError(f"run {run_id} belongs to another robot")
         # Lock order is always robot -> run (same as start()), so the two can't deadlock.
         robot = await self.robots.get(unlocked.robot_id, for_update=True)
         run = await self.runs.get(run_id, for_update=True)

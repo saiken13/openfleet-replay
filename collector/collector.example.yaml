@@ -1,6 +1,7 @@
 # openfleet-collector configuration. Copy and edit for your robot.
 api_url: http://localhost:8000
 robot_id: ros-bot-01
+# api_key: ofk_...            # prefer env OPENFLEET_API_KEY; issue with `openfleet keys create ros-bot-01`
 robot_name: ROS Bot 01
 robot_model: TurtleBot4
 software_version: "1.0.0"     # your robot software's version; shows up on runs and incidents

@@ -10,8 +10,11 @@ rolled back when the test ends.
 """
 
 import asyncio
+import json
 import os
-from collections.abc import AsyncIterator, Callable
+import re
+import uuid
+from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from datetime import UTC, datetime, timedelta
@@ -33,8 +36,10 @@ from alembic import command
 from app.api.deps import get_now
 from app.core.config import Settings
 from app.db.session import get_session
+from app.domain.errors import DomainError
 from app.main import create_app
 from app.realtime.hub import Hub
+from app.services.api_key_service import ApiKeyService
 from app.workers.sweeper import Sweeper
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
@@ -129,12 +134,78 @@ class Clock:
         return self.now
 
 
+def test_key(robot_id: str) -> str:
+    """The deterministic API key the test client uses for a robot."""
+    return f"test-robot-key-{robot_id}"
+
+
+_ROBOT_PATH = re.compile(r"^/api/v1/robots/([^/]+)")
+_RUN_PATH = re.compile(r"^/api/v1/runs/([0-9a-fA-F-]{36})(/|$)")
+DEFAULT_TEST_ROBOT = "robot-01"
+
+
+class RobotKeyAuth(httpx.Auth):
+    """Signs each request as the robot it acts for, issuing that robot's key on first use
+    (inside the test transaction, so it rolls back). This keeps API tests about behaviour,
+    not credentials; tests/test_auth.py checks the auth itself with `auth=None`."""
+
+    requires_request_body = True
+
+    def __init__(self, session: AsyncSession) -> None:
+        self.session = session
+        self.issued: set[str] = set()
+
+    async def _robot_for(self, request: httpx.Request) -> str:
+        path = request.url.path
+        if m := _ROBOT_PATH.match(path):
+            return m.group(1)
+        if m := _RUN_PATH.match(path):
+            if request.method == "PUT":  # run start: the robot is in the body
+                try:
+                    return str(json.loads(request.content)["robot_id"])
+                except (ValueError, KeyError, TypeError):
+                    return DEFAULT_TEST_ROBOT
+            from app.db.models import Run
+
+            try:
+                run = await self.session.get(Run, uuid.UUID(m.group(1)))
+            except ValueError:
+                run = None
+            if run is not None:
+                return run.robot_id
+        # Unknown run, or a read: any valid key, so the endpoint's own 404/422 shows.
+        return DEFAULT_TEST_ROBOT
+
+    async def _ensure_key(self, robot_id: str) -> bool:
+        if robot_id not in self.issued:
+            try:
+                await ApiKeyService(self.session).seed({robot_id: test_key(robot_id)})
+            except DomainError:
+                await self.session.rollback()
+                return False
+            self.issued.add(robot_id)
+        return True
+
+    async def async_auth_flow(
+        self, request: httpx.Request
+    ) -> AsyncGenerator[httpx.Request, httpx.Response]:
+        robot_id = await self._robot_for(request)
+        if not await self._ensure_key(robot_id):
+            # An invalid robot id can't hold a key; sign with a valid one so the
+            # endpoint's own validation (422) is what the test sees.
+            robot_id = DEFAULT_TEST_ROBOT
+            await self._ensure_key(robot_id)
+        request.headers["Authorization"] = f"Bearer {test_key(robot_id)}"
+        yield request
+
+
 @asynccontextmanager
 async def _client_for(
     settings: Settings, session: AsyncSession | None = None, clock: Clock | None = None
 ) -> AsyncIterator[httpx.AsyncClient]:
     """An HTTP client bound to a fresh app instance, with its lifespan running.
-    The app is reachable as `client.app` (for its hub)."""
+    The app is reachable as `client.app` (for its hub). With a session, requests are
+    signed with the acting robot's API key (RobotKeyAuth); pass `auth=None` to opt out."""
     app = create_app(settings)
     if session is not None:
 
@@ -146,7 +217,10 @@ async def _client_for(
         app.dependency_overrides[get_now] = lambda: clock.now
     async with app.router.lifespan_context(app):
         transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        auth = RobotKeyAuth(session) if session is not None else None
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://test", auth=auth
+        ) as client:
             client.app = app  # type: ignore[attr-defined]
             yield client
 
@@ -189,13 +263,23 @@ async def purge_robots(session: AsyncSession, prefix: str) -> None:
         Incident,
         NodeStateRow,
         Robot,
+        RobotApiKey,
         Run,
         TelemetrySample,
         TopicSample,
         TopicState,
     )
 
-    for model in (Incident, Event, TopicSample, TelemetrySample, TopicState, NodeStateRow, Run):
+    for model in (
+        Incident,
+        Event,
+        TopicSample,
+        TelemetrySample,
+        TopicState,
+        NodeStateRow,
+        Run,
+        RobotApiKey,
+    ):
         await session.execute(delete(model).where(model.robot_id.startswith(prefix)))
     await session.execute(delete(Robot).where(Robot.id.startswith(prefix)))
     await session.commit()

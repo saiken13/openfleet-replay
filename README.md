@@ -56,7 +56,21 @@ Open the dashboard, click an incident, then **Replay from 15s before ▶**.
 
 Without `--profile demo` you get the platform with an empty fleet. Run the simulator yourself (see below).
 
+Robots authenticate with per-robot API keys (see below). The local stack seeds the **public** demo keys in `examples/demo-robot-keys.json`, so the demo works with no setup. Never expose that configuration.
+
 Postgres is published on host port **5433** (not 5432), so it doesn't clash with a locally installed Postgres. Override it with `OPENFLEET_PG_HOST_PORT`.
+
+## Robot API keys
+
+Every robot write (register, heartbeat, runs, telemetry) needs `Authorization: Bearer <key>`, and a key only works for its own robot. Reads are still open (dashboard auth is next). Manage keys on the server:
+
+```bash
+docker compose exec backend openfleet keys create ros-bot-01 --label "lab TurtleBot"   # prints the key once
+docker compose exec backend openfleet keys list [--robot ros-bot-01]
+docker compose exec backend openfleet keys revoke KEY_ID
+```
+
+To rotate a key, create a new one, deploy it, then revoke the old one. A robot can hold several active keys. See [DECISIONS #021](docs/DECISIONS.md).
 
 ## Connect a real ROS 2 robot
 
@@ -66,6 +80,7 @@ On the robot, inside its ROS 2 environment (Humble or Jazzy):
 source /opt/ros/jazzy/setup.bash
 python3 -m venv --system-site-packages ~/openfleet && ~/openfleet/bin/pip install ./collector
 cp collector/collector.example.yaml collector.yaml   # set api_url, robot_id, topics + expected Hz, nodes
+export OPENFLEET_API_KEY=ofk_...                     # from `openfleet keys create <robot_id>`
 ~/openfleet/bin/openfleet-collector --config collector.yaml
 ```
 
@@ -79,6 +94,7 @@ python collector/ros_test/e2e.py   # scripts a degradation, a stop, a node crash
 
 ```bash
 pip install -e backend -e simulator
+export OPENFLEET_ROBOT_KEYS_FILE=examples/demo-robot-keys.json                   # robot keys
 openfleet-sim -s simulator/scenarios/healthy.yaml --fast -o base.json            # v1.0.0
 openfleet-sim -s simulator/scenarios/lidar_regression.yaml --fast -o cand.json   # v1.1.0
 openfleet check "$(jq -r '.[0].run_id' cand.json)" -c examples/regression.yaml \
@@ -127,11 +143,13 @@ cd backend
 python3.12 -m venv .venv && .venv/bin/pip install -e ".[dev]"
 .venv/bin/alembic upgrade head
 .venv/bin/pytest                         # real Postgres, separate `openfleet_test` DB (auto-created)
-.venv/bin/uvicorn app.main:app --reload  # http://localhost:8000
+OPENFLEET_ROBOT_KEYS_FILE=../examples/demo-robot-keys.json \
+  .venv/bin/uvicorn app.main:app --reload  # http://localhost:8000 (seeds the demo robot keys)
 
 # Simulator
 cd simulator
 python3.12 -m venv .venv && .venv/bin/pip install -e ".[dev]"
+export OPENFLEET_ROBOT_KEYS_FILE=../examples/demo-robot-keys.json
 .venv/bin/openfleet-sim -s scenarios/demo.yaml            # real time
 .venv/bin/openfleet-sim -s scenarios/demo.yaml --speed 4  # compressed
 .venv/bin/pytest
@@ -147,18 +165,18 @@ npm test && npm run typecheck
 | Path | Contents |
 |---|---|
 | `backend/app/` | FastAPI app: `api/` (routers), `services/`, `repositories/` (SQL), `detection/` (pure rules), `realtime/` (hub), `workers/` (sweeper) |
-| `backend/openfleet_cli/` | `openfleet check` regression CLI (thin HTTP client) |
+| `backend/openfleet_cli/` | `openfleet check` regression CLI (thin HTTP client) and `openfleet keys` (robot API keys, direct DB) |
 | `backend/alembic/` | Migrations (CI runs `alembic check` so models and migrations can't drift) |
 | `collector/` | ROS 2 collector (runs on the robot) + ROS 2 end-to-end test |
 | `simulator/` | Simulated robots + YAML failure scenarios (public API only) |
 | `frontend/` | React + TypeScript + Vite + Tailwind dashboard |
-| `examples/` | Example regression config |
+| `examples/` | Example regression config; public demo robot keys |
 | `docs/` | Architecture, decisions, flows, constraints, bugs |
 
 ## Status and limits
 
 This is an MVP. It's single-process by design. The known scaling limits and their evolution paths are listed in [ARCHITECTURE §10](docs/ARCHITECTURE.md). These aren't built yet:
-- authentication
+- dashboard/user authentication, roles and WebSocket auth (robot API keys are done)
 - re-detection replay
 - rosbag/MCAP recordings
 

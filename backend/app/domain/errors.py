@@ -17,3 +17,7 @@ class ConflictError(DomainError):
 
 class InvalidRequestError(DomainError):
     """Well-formed input that is invalid given stored state (e.g. ended_at before started_at)."""
+
+
+class ForbiddenError(DomainError):
+    """The caller is authenticated but may not act on this entity (e.g. another robot's run)."""

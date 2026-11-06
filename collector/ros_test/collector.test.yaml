@@ -1,5 +1,6 @@
 api_url: http://backend:8000
 robot_id: ros-test-01
+api_key: ofk_demo_ros-test-01_public-not-secret  # examples/demo-robot-keys.json
 robot_name: ROS Test Robot
 robot_model: Jazzy container
 software_version: "0.1.0-test"

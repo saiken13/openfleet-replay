@@ -16,6 +16,25 @@ GET /api/v1/health
 
 The engine is created in the app lifespan (`backend/app/main.py :: create_app()`) and disposed on shutdown. Tests build a fresh app per test with `create_app(settings)`.
 
+## 0a. Robot authentication (every robot write: 0b, 0c, 1, 2)
+
+```
+Authorization: Bearer <key>
+→ backend/app/api/auth.py :: authenticated_robot()      FastAPI dependency, runs before body validation
+    ├─ no/other-scheme header → 401 (WWW-Authenticate: Bearer)
+    ├─ ApiKeyService.authenticate()  backend/app/services/api_key_service.py
+    │     ApiKeyRepository.active_by_hash(sha256(key))   unique index; revoked_at IS NULL; read-only
+    └─ unknown/revoked → 401, else → caller robot_id
+→ ownership
+    ├─ register / heartbeat: require_robot(caller, path robot_id)          → 403
+    ├─ run start:            require_robot(caller, body.robot_id)          → 403
+    └─ run end / telemetry:  RunService.end / TelemetryService.ingest(caller_robot_id=…)
+                             after the run lookup: 404 if missing, ForbiddenError → 403 if not owned
+
+Keys: openfleet keys create|list|revoke → backend/openfleet_cli/keys.py → ApiKeyService.issue/list/revoke (direct DB)
+Seed: app/main.py :: seed_robot_keys() at startup if OPENFLEET_ROBOT_KEYS_FILE → ApiKeyService.seed()
+```
+
 ## 0b. Robot registration
 
 ```

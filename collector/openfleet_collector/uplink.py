@@ -32,6 +32,7 @@ class Uplink:
         api_url: str,
         robot_id: str,
         *,
+        api_key: str | None = None,
         robot_name: str | None = None,
         robot_model: str | None = None,
         software_version: str | None = None,
@@ -45,7 +46,10 @@ class Uplink:
         self.robot_name = robot_name or robot_id
         self.robot_model = robot_model
         self.software_version = software_version
-        self.client = httpx.Client(base_url=api_url, timeout=timeout_s, transport=transport)
+        headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+        self.client = httpx.Client(
+            base_url=api_url, timeout=timeout_s, transport=transport, headers=headers
+        )
         self.clock = clock
         # Default sleep wakes up early on stop(); tests inject a no-op.
         self.sleep = sleep or self._interruptible_sleep
@@ -92,6 +96,9 @@ class Uplink:
             try:
                 self._start_run()
                 return
+            except _AuthRejected as exc:
+                log.error("%s; retrying in %.1fs", exc, self._backoff)
+                self._wait_backoff()
             except (httpx.TransportError, _Retryable) as exc:
                 log.warning("cannot reach OpenFleet (%s); retrying in %.1fs", exc, self._backoff)
                 self._wait_backoff()
@@ -160,6 +167,11 @@ class Uplink:
         if resp.status_code >= 500:
             log.warning("server error %d; %d buffered", resp.status_code, self.pending())
             return False
+        if resp.status_code in (401, 403):
+            # The data is fine; the credential isn't. Keep it buffered (bounded) until the
+            # key is fixed, rather than dropping every batch.
+            log.error("%s; %d buffered", _AuthRejected.for_response(resp), self.pending())
+            return False
         if resp.status_code in (404, 409):
             log.warning(
                 "run %s rejected (%d: %s); starting a new run", run_id, resp.status_code, resp.text
@@ -214,8 +226,21 @@ class Uplink:
     def _check(resp: httpx.Response) -> None:
         if resp.status_code >= 500:
             raise _Retryable(f"HTTP {resp.status_code}")
+        if resp.status_code in (401, 403):
+            raise _AuthRejected.for_response(resp)
         resp.raise_for_status()
 
 
 class _Retryable(Exception):
     pass
+
+
+class _AuthRejected(_Retryable):
+    """401/403: the API key is missing, wrong, revoked, or for another robot. Retried, since
+    an operator can fix it server-side (issue the key) without restarting the robot."""
+
+    @classmethod
+    def for_response(cls, resp: httpx.Response) -> "_AuthRejected":
+        return cls(
+            f"OpenFleet rejected the robot API key (HTTP {resp.status_code}: {resp.text[:200]})"
+        )
