@@ -225,3 +225,6 @@ __marimo__/
 node_modules/
 .vite/
 !frontend/src/lib/
+
+# graphify code graph (local, regenerate with: graphify update .)
+graphify-out/
