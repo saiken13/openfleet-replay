@@ -46,7 +46,7 @@ Dashboard: POST /api/v1/auth/login {username, password} + X-OpenFleet-Client hea
 → UserService.login()  backend/app/services/user_service.py
     ├─ UserRepository.by_username(lowercase)        unknown → verify against DUMMY_HASH (same timing)
     ├─ passwords.verify_password() in a thread      scrypt, constant-time compare
-    └─ insert SESSION token (sha256), expires now + SESSION_TTL_S; COMMIT
+    └─ insert SESSION token (sha256), expires now + SESSION_TTL_S, absolute_expires_at now + SESSION_MAX_S; COMMIT
 → wrong credentials → 401 (the reserved slots stay used)
 → LoginThrottle.succeeded(): clear the username counter, give back the IP slot
 → 200 UserRead + Set-Cookie openfleet_session (HttpOnly, SameSite=Strict, Path=/api)
@@ -54,6 +54,8 @@ Dashboard: POST /api/v1/auth/login {username, password} + X-OpenFleet-Client hea
 Any read: app/api/auth.py :: current_user()   (via require_viewer / require_operator)
     ├─ Bearer header (API token) or else the session cookie   → none: 401
     ├─ UserRepository.active_token(sha256, now)    not revoked, not expired, user not disabled → else 401
+    ├─ session? slide (#029): expires_at = min(now + SESSION_TTL_S, absolute_expires_at)
+    │     only if that moves it ≥ SESSION_REFRESH_S; conditional UPDATE + COMMIT
     ├─ cookie + unsafe method without X-OpenFleet-Client → 403 (CSRF)
     └─ require_operator: role < OPERATOR → 403      (PATCH /incidents/{id}; actor recorded in triage_actions and on the event)
 
@@ -166,6 +168,11 @@ Sweeper (every SWEEP_INTERVAL_S; started in app lifespan, backend/app/main.py)
      └─ per robot: lock, Detector.evaluate()  → OFFLINE; heartbeat_missing incident if in a run (#019)
 → LivenessService.abort_abandoned_runs(now)    OFFLINE robots with a current run, silent > RUN_ABANDON_AFTER_S
      └─ per robot: RunService.finish_run(ABORTED, reason="abandoned"); run_ended event
+→ Sweeper._retention(now)   RETENTION_DAYS set and RETENTION_INTERVAL_S since the last pass (#030)
+     └─ RetentionService.run(): due() finished runs, ended < now - days, oldest first, ≤ RETENTION_BATCH_RUNS
+        per run: lock row → freeze metrics/topics/event counts into runs.summary
+                 → DELETE samples, topic samples, heartbeat spans, log events → compacted_at; COMMIT
+   (also: openfleet retention --days N [--dry-run]   backend/openfleet_cli/retention.py)
 ```
 
 ## 3. Detection → incident

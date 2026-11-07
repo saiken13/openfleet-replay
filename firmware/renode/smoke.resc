@@ -1,0 +1,9 @@
+# Phase 0 platform smoke test (docs/EMBEDDED_ROADMAP.md): Renode boots an STM32F4 Discovery
+# and its UART4 is reachable over TCP :3456. It runs Antmicro's prebuilt Contiki demo; Phase 3
+# replaces it with our own FreeRTOS firmware. Emulated hardware, not a physical board.
+mach create "stm32f4"
+machine LoadPlatformDescription @platforms/boards/stm32f4_discovery-kit.repl
+sysbus LoadELF @https://dl.antmicro.com/projects/renode/stm32f4discovery.elf-s_445441-827a0dedd3790f4559d7518320006613768b5e72
+emulation CreateServerSocketTerminal 3456 "term" false
+connector Connect sysbus.uart4 term
+start

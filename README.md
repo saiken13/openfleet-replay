@@ -82,14 +82,22 @@ docker compose exec backend openfleet keys list | revoke KEY_ID
 docker compose exec backend openfleet users create alice --role operator             # prompts for a password
 docker compose exec backend openfleet users list | set-role alice viewer | passwd alice | disable alice
 docker compose exec backend openfleet users token create ci-bot --label ci --expires-days 90   # → OPENFLEET_TOKEN
+docker compose exec backend openfleet retention --days 30 --dry-run   # what data retention would remove
 ```
 
+- **Data retention:** off by default. Set `OPENFLEET_RETENTION_DAYS=30` and the backend compacts finished runs older than that: their summary is frozen (so `openfleet check` against an old baseline still works), and the per-second telemetry and log lines are deleted. Incidents and the triage audit are kept. See DECISIONS #030.
 - **Rotating a robot key:** create a new one, deploy it, then revoke the old one. A robot can hold several active keys.
-- **Sessions:** HttpOnly SameSite=Strict cookies that last 12 h.
+- **Sessions:** HttpOnly SameSite=Strict cookies. A session ends after 12 h without use, and always 7 days after sign-in (`OPENFLEET_SESSION_TTL_S` / `OPENFLEET_SESSION_MAX_S`).
 - **Login throttling:** 5 failed sign-ins per username, or 20 per client IP, in 5 minutes gets a 429 with `Retry-After`. Tune it with `OPENFLEET_LOGIN_*`. Counters are shared across replicas through Redis.
 - **Production:** behind HTTPS, set `OPENFLEET_COOKIE_SECURE=true`. Drop the demo `*_FILE` and `LOGIN_HINT` settings. Don't expose the backend port directly, and set `FORWARDED_ALLOW_IPS` to your proxy's address. The proxy must overwrite `X-Forwarded-For` (see `frontend/nginx.conf`).
 
-See [DECISIONS #021, #022 and #027](docs/DECISIONS.md).
+See [DECISIONS #021, #022, #027 and #029](docs/DECISIONS.md).
+
+## Embedded & C++ (in progress)
+
+A C++20 edge agent, a binary device protocol and FreeRTOS firmware on an emulated STM32F4 are being added, all without physical hardware; see the [roadmap](docs/EMBEDDED_ROADMAP.md).
+
+Phase 0 is done: the dev container (`scripts/edge-dev.sh`), CMake presets with sanitizers and an aarch64 cross-compile tested under QEMU in CI, and a Renode STM32F4 smoke test (`firmware/renode/smoke.sh`). See [edge/README.md](edge/README.md).
 
 ## Connect a real ROS 2 robot
 

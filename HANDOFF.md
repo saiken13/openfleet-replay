@@ -7,6 +7,18 @@
 - **Latest commit:** see `git log -1`
 
 ## Current state
+**Data retention done (2026-11-07, DECISIONS #030). The 7-item batch is complete.** With `OPENFLEET_RETENTION_DAYS` set (off by default, including in compose), the sweeper compacts finished runs older than that, at most once per hour, 20 runs per pass. Compacting freezes the summary aggregates into `runs.summary`, deletes samples, topic samples, heartbeat spans and log events, and sets `runs.compacted_at` (migration 0008). Summary, compare and check read the frozen data; redetect returns 422; the run page shows a notice. CLI: `openfleet retention --days N [--dry-run] [--json]`. Code: `app/services/retention_service.py`, `Sweeper._retention`, `openfleet_cli/retention.py`. Tests: `tests/test_retention.py` (5, incl. a real-commit CLI test). Verified live: a dry run over the dev DB listed 103 runs and deleted nothing; compacting one throwaway run left its summary byte-identical, redetect refused it, and the run page showed the notice (screenshot).
+
+**Embedded Phase 0 done (2026-11-07, DECISIONS #031); roadmap: [docs/EMBEDDED_ROADMAP.md](docs/EMBEDDED_ROADMAP.md).**
+- **Dev container:** `edge/docker/Dockerfile.dev`, run with `scripts/edge-dev.sh`. It has gcc 13, clang 18, gdb, valgrind, cmake, the cross g++ for the other architecture, qemu-user and Renode 1.17.
+- **`edge/`:** a CMake C++20 project with presets native/release/asan/tsan/aarch64/x86_64. The first component is `include/openfleet/edge/bounded_queue.hpp`, with 7 GoogleTest tests.
+- **CI:** job `edge` runs native, ASan+UBSan and TSan, then the x86_64 → aarch64 cross build with tests under qemu-aarch64.
+- **Renode spike passed:** it runs natively on arm64 and `firmware/renode/smoke.sh` boots an STM32F4 with UART4 over TCP. The IWDG is modelled.
+- **Verified:** all presets locally; seeded TSan/ASan bugs are caught; the CI job's commands replayed in an emulated amd64 container.
+- **Next: Phase 1, the C++ edge agent** (`/proc` sampling, uplink with the Python collector's contract, SIGTERM, e2e against compose).
+
+**Sliding sessions done (2026-11-07, DECISIONS #029).** Sessions get `absolute_expires_at = login + SESSION_MAX_S` (7 d; migration 0007). Each request extends `expires_at` to `min(now + SESSION_TTL_S, absolute)` when that moves it ≥ `SESSION_REFRESH_S` (300 s). The extension happens in `current_user` via `UserService.authenticate(..., Sliding)` + `UserRepository.extend_token` (conditional UPDATE). WebSocket re-checks don't slide; API tokens never do. Cookie `Max-Age` = `SESSION_MAX_S`. Tests: `tests/test_sessions.py` (7); `test_session_expires` became `test_session_expires_when_idle`. Verified live: through :8080 the cookie has `Max-Age=604800`. A throwaway backend container with TTL 20 s / MAX 60 s / refresh 0 showed an active session alive at 30 s and 45 s, then 401 at 60 s (cap); an idle session was 401 at 30 s.
+
 **Heartbeats stored per run (2026-11-07, DECISIONS #028).** A heartbeat during a run extends or starts a `heartbeat_spans` row (migration 0006; `app/repositories/heartbeat_repository.py`, hooked in `LivenessService.heartbeat`). The row is in robot time (`ts`, else server now) and merges heartbeats up to `HEARTBEAT_SPAN_GAP_S` = 5 s apart. `replay_run(contacts=...)` now treats spans as contact: uncovered gaps over the timeout are silence; covered ones are a live robot whose data goes stale, evaluated at change points (last-fresh / first-stale instants, hysteresis deadlines, contact end). Simulator: new `telemetry_stall` failure kind and scenario; CI asserts `redetect` on it gives `new == 0`. Tests: `tests/test_heartbeat_spans.py` (9: storage, pure replay, and two live-vs-replay parity runs with the sweeper ticking) + 1 simulator test. Verified live: a fast stall run made one 25-heartbeat span, and the replay caught `/scan` with no new incidents; with the spans deleted, it reported a `replay_only` heartbeat_missing. A real-time run (60 s) matched live: the robot never went OFFLINE during the stall; live and replay both opened and cleared `topic_rate:/scan` (caught 1, missed 0, new 0); one span, 25 heartbeats over 24 s.
 
 **Login throttling done (2026-11-06, DECISIONS #027).** `app/services/login_throttle.py :: LoginThrottle` reserves a slot per username and per client IP before the password is checked. Over the limit (5 / 20 per 300 s), the response is 429 + `Retry-After`. Counters are kept in Redis (shared by replicas), falling back to memory. Success clears the username counter and gives back the IP slot. Both nginx configs now overwrite `X-Forwarded-For` with `$remote_addr`, and compose sets `FORWARDED_ALLOW_IPS: "*"` so uvicorn uses it. The login page shows the wait. Also fixed `alembic/env.py`: `fileConfig` was disabling every already-imported app logger when migrations ran in-process. Tests: `tests/test_login_throttle.py` (10, two of them against real Redis). Verified live through :8080: five 401s then a 429; a spoofed `X-Forwarded-For` was ignored (the key held the real client IP, not nginx's); both keys were in Redis; one warning was logged; the login page showed the message (headless-Chrome screenshot).
@@ -37,7 +49,7 @@
 - Docker Compose: Postgres + backend + nginx frontend + simulator
 - Screenshots taken of the fleet, incident and replay pages
 
-CI jobs: backend, simulator, frontend, collector, ros2-collector-e2e, `e2e-regression-check` (threshold check, the re-detection gate, and the telemetry-stall replay check) and `e2e-multi-replica`.
+CI jobs: backend, simulator, frontend, edge (C++: sanitizers + aarch64 cross under qemu), collector, ros2-collector-e2e, `e2e-regression-check` (threshold check, the re-detection gate, and the telemetry-stall replay check) and `e2e-multi-replica`.
 
 ## Completed
 - **Backend** (`backend/app/`):
@@ -60,17 +72,17 @@ CI jobs: backend, simulator, frontend, collector, ros2-collector-e2e, `e2e-regre
   - Modes: real time, `--fast`, and `--loop`.
 - **Frontend** (`frontend/`): fleet, robot (live), incidents, incident detail (charts, timeline, first signal, triage), runs, run replay, and compare.
 - **Tests:**
-  - Backend: 238 (incl. 9 heartbeat-span tests, 10 login-throttle tests, 4 triage-audit tests, 9 bus tests, 4 sweeper-lock tests, 15 pure replay-engine tests and 8 redetect API tests), against real Postgres, including concurrency races and mutation-checked guards. Auth tests: `tests/test_auth.py` (robots), `tests/test_user_auth.py` (users, with a route-coverage test), the WS auth in `tests/test_realtime.py`, and the CLI in `tests/test_cli.py`.
+  - Backend: 250 (incl. 5 retention tests, 7 sliding-session tests, 9 heartbeat-span tests, 10 login-throttle tests, 4 triage-audit tests, 9 bus tests, 4 sweeper-lock tests, 15 pure replay-engine tests and 8 redetect API tests), against real Postgres, including concurrency races and mutation-checked guards. Auth tests: `tests/test_auth.py` (robots), `tests/test_user_auth.py` (users, with a route-coverage test), the WS auth in `tests/test_realtime.py`, and the CLI in `tests/test_cli.py`.
   - Simulator: 15.
   - Collector: 24.
   - Frontend: 17 (reducer, ReplayClock, auth helpers, redetect overrides).
-- **Docs:** README, ARCHITECTURE, FLOW (real file:function paths), DECISIONS 001–028, BUGS 001–003, CONSTRAINTS.
+- **Docs:** README, ARCHITECTURE, FLOW (real file:function paths), DECISIONS 001–031, BUGS 001–003, CONSTRAINTS.
 
 ## Currently working
 Nothing in progress.
 
 ## Not built yet
-- **Auth follow-ups:** SSO/OIDC, multi-tenancy, sliding sessions.
+- **Auth follow-ups:** SSO/OIDC, multi-tenancy.
 - **rosbag2/MCAP storage:** object storage.
 - **Scaling work** (ARCHITECTURE §10): TimescaleDB, retention, detection behind a queue. (Sweeper lock #024 and Redis fan-out #025 are done.)
 
@@ -95,6 +107,11 @@ None open. Fixed bugs are recorded in docs/BUGS.md.
 - **Enum changes:** changing a `StrEnum` needs a migration that updates the CHECK constraint (#015).
 - **Clocks:** incident times are server time and frame times are robot time. They're aligned when robot clocks are roughly correct, which the simulator ensures in real-time mode (BUG-003).
 - **Fast mode:** in `openfleet-sim --fast`, incidents don't auto-resolve *by hysteresis* within the run (it uses server time), but they still resolve when the run ends (#017), so a finished fast run leaves nothing open. To triage a live incident by hand, run `simulator/.venv/bin/openfleet-sim -s simulator/scenarios/lidar_regression.yaml --keys examples/demo-robot-keys.json` in real time (60 s).
+- **Embedded dev:**
+  - Run everything C/C++ through `scripts/edge-dev.sh` (it builds the image on first use); the Mac has no gdb or valgrind.
+  - Locally the container is arm64, so `native` = aarch64 and the cross preset to try is `x86_64`. The `aarch64` preset is the CI path (from x86_64).
+  - Renode's console quits at the end of its input: run it as `sleep infinity | renode --disable-gui --console ...`.
+  - macOS ships bash 3.2: empty arrays under `set -u` need `${a[@]+"${a[@]}"}`.
 - **Simulator binary:** `openfleet-sim` lives in `simulator/.venv/bin/`, not the backend venv.
 - **Logging in from a script:** `POST /api/v1/auth/login` needs the `X-OpenFleet-Client` header (CSRF defense), as do cookie-authenticated writes.
 - **Login throttle (#027):** scripts that log in repeatedly with a wrong password get 429s for up to 5 min. To unlock the dev stack: `docker compose exec -T redis redis-cli --scan --pattern 'openfleet:login:*' | xargs docker compose exec -T redis redis-cli DEL` (or restart the backend if Redis isn't in use). Through :8080 the per-IP key is Docker Desktop's gateway (192.168.65.1), so every host browser shares one IP limit.
@@ -143,8 +160,10 @@ docker compose up -d postgres
 3. ~~**Triage audit view.**~~ Done (#026): `triage_actions` table + `GET /triage` + Audit page. Note: only resolves had the actor before; INVESTIGATING was unrecorded, hence a table rather than an events query.
 4. ~~**Login rate limiting.**~~ Done (#027): in-app per-username/per-IP windows in Redis (memory fallback), 429 + Retry-After; nginx overwrites `X-Forwarded-For`.
 5. ~~**Store heartbeats per run.**~~ Done (#028): merged `heartbeat_spans`; replay treats them as contact; `telemetry_stall` scenario gated in CI.
-6. **Sliding sessions.** Extend a session's expiry while it's in use, up to an absolute maximum.
-7. **Data retention.** Delete or downsample old runs' telemetry after a configurable age, in the sweeper or as a CLI command.
+6. ~~**Sliding sessions.**~~ Done (#029): idle 12 h, cap 7 d, extension throttled to once per 5 min; WebSockets don't slide.
+7. ~~**Data retention.**~~ Done (#030): compact runs (frozen summary, raw rows deleted) via the sweeper or `openfleet retention`; off by default.
+
+**Next: Embedded Phase 1 (C++ edge agent).** Phase 0 is done. See [docs/EMBEDDED_ROADMAP.md](docs/EMBEDDED_ROADMAP.md).
 
 **Not in the batch: these need the owner's decisions first.**
 - OIDC: which provider; auto-create users or invite only?

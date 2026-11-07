@@ -47,6 +47,15 @@ class UserRepository:
         row = (await self.session.execute(stmt)).one_or_none()
         return (row[0], row[1]) if row is not None else None
 
+    async def extend_token(self, token_id: uuid.UUID, expires_at: datetime) -> None:
+        """Move a token's expiry forward (never back); concurrent extensions just race to the
+        same kind of value, and the later one wins."""
+        await self.session.execute(
+            update(UserToken)
+            .where(UserToken.id == token_id, UserToken.expires_at < expires_at)
+            .values(expires_at=expires_at)
+        )
+
     async def token_by_hash(self, token_hash: str) -> UserToken | None:
         stmt = select(UserToken).where(UserToken.token_hash == token_hash)
         return (await self.session.scalars(stmt)).one_or_none()
@@ -59,6 +68,7 @@ class UserRepository:
         prefix: str,
         label: str | None,
         expires_at: datetime | None,
+        absolute_expires_at: datetime | None = None,
     ) -> UserToken | None:
         """Returns None if the hash already exists (race-safe)."""
         stmt = (
@@ -71,6 +81,7 @@ class UserRepository:
                 prefix=prefix,
                 label=label,
                 expires_at=expires_at,
+                absolute_expires_at=absolute_expires_at,
             )
             .on_conflict_do_nothing(index_elements=["token_hash"])
             .returning(UserToken)

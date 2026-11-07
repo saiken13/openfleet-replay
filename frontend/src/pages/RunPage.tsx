@@ -88,6 +88,13 @@ export function RunPage() {
         )}
       </div>
       {error && <div className="card border-rose-500/40 px-4 py-3 text-sm text-rose-300">{error}</div>}
+      {run?.compacted_at && (
+        <div className="card border-amber-500/40 px-4 py-3 text-sm text-amber-200">
+          Data retention removed this run's raw telemetry on {fmtDateTime(run.compacted_at)}. The summary,
+          incidents and state-change events are kept; the replay shows only those events, and
+          re-detection isn't available.
+        </div>
+      )}
 
       <div className="card sticky top-0 z-10 bg-slate-900/95 p-3 backdrop-blur">
         <div className="flex flex-wrap items-center gap-3">
@@ -142,13 +149,13 @@ export function RunPage() {
 
       {summary && <SummaryPanel s={summary} />}
 
-      <RedetectPanel
+      {!run?.compacted_at && <RedetectPanel
         runId={runId}
         onSeek={(iso) => {
           c?.seek(Math.max(0, Date.parse(iso) - c.t0 - 5000));
           window.scrollTo({ top: 0, behavior: "smooth" });
         }}
-      />
+      />}
     </div>
   );
 }

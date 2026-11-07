@@ -65,6 +65,8 @@ class Run(Base):
         enum_check("status", RunStatus, "status"),
         Index("ix_runs_robot_id_started_at", "robot_id", text("started_at DESC")),
         Index("ix_runs_started_at", text("started_at DESC")),
+        # Retention (DECISIONS #030) looks for finished, not-yet-compacted runs by age.
+        Index("ix_runs_retention", "ended_at", postgresql_where=text("compacted_at IS NULL")),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)  # client-generated
@@ -73,6 +75,10 @@ class Run(Base):
     status: Mapped[str] = mapped_column(Text, server_default=text(f"'{RunStatus.RUNNING}'"))
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))  # robot time
     ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Retention (DECISIONS #030): when the raw telemetry was removed, and the summary
+    # aggregates frozen just before, so summary/compare/check still answer for this run.
+    compacted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    summary: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
 
 
 TZ = DateTime(timezone=True)
@@ -267,6 +273,8 @@ class UserToken(Base):
     label: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(TZ, server_default=func.now())
     expires_at: Mapped[datetime | None] = mapped_column(TZ)
+    # Sessions only (DECISIONS #029): `expires_at` slides forward with use, never past this.
+    absolute_expires_at: Mapped[datetime | None] = mapped_column(TZ)
     revoked_at: Mapped[datetime | None] = mapped_column(TZ)
 
 

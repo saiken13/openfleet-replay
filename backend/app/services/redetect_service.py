@@ -44,6 +44,11 @@ class RedetectService:
         run = await self.runs.get(run_id)
         if run is None:
             raise NotFoundError(f"run {run_id} not found")
+        if run.compacted_at is not None:
+            raise InvalidRequestError(
+                f"run {run_id} was compacted by data retention on "
+                f"{run.compacted_at:%Y-%m-%d}; its telemetry is gone, so it can't be replayed"
+            )
         n = await self.analysis.sample_count(run_id)
         if n > self.settings.redetect_max_samples:
             raise InvalidRequestError(

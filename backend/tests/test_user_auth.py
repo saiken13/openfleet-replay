@@ -159,14 +159,12 @@ async def test_login_requires_the_client_header(
     assert resp.status_code == 403
 
 
-async def test_session_expires(
+async def test_session_expires_when_idle(
     client: httpx.AsyncClient, db_session: AsyncSession, clock: Clock, settings
 ) -> None:
     await make_user(db_session)
     await login(client)
-    clock.advance(settings.session_ttl_s - 1)
-    assert (await client.get("/api/v1/auth/me", auth=None)).status_code == 200
-    clock.advance(2)
+    clock.advance(settings.session_ttl_s + 1)  # unused for longer than the idle lifetime
     resp = await client.get("/api/v1/auth/me", auth=None)
     assert resp.status_code == 401 and resp.json()["detail"] == "session expired or token invalid"
 

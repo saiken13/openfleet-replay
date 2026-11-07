@@ -30,6 +30,8 @@ export interface Run {
   status: RunStatus;
   started_at: string;
   ended_at: string | null;
+  /** Data retention removed its raw telemetry (DECISIONS #030); summaries still work. */
+  compacted_at?: string | null;
 }
 
 export interface RunPage {

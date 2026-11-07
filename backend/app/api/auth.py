@@ -8,16 +8,17 @@ Users (DECISIONS #022): the dashboard's session cookie, or a user API token as
 """
 
 from collections.abc import Mapping
+from datetime import timedelta
 from typing import Annotated
 
 from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
-from app.api.deps import NowDep, SessionDep
+from app.api.deps import NowDep, SessionDep, SettingsDep
 from app.db.models import User
 from app.domain.enums import UserRole
 from app.services.api_key_service import ApiKeyService
-from app.services.user_service import UserService, has_role
+from app.services.user_service import Sliding, UserService, has_role
 
 _bearer = HTTPBearer(
     scheme_name="RobotApiKey",
@@ -86,13 +87,18 @@ def user_token_from(
 async def current_user(
     request: Request,
     session: SessionDep,
+    settings: SettingsDep,
     now: NowDep,
     credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(user_bearer)],
 ) -> User:
     token, via_cookie = user_token_from(credentials, request.cookies)
     if not token:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "not signed in", _CHALLENGE)
-    user = await UserService(session).authenticate(token, now)
+    sliding = Sliding(
+        ttl=timedelta(seconds=settings.session_ttl_s),
+        refresh=timedelta(seconds=settings.session_refresh_s),
+    )
+    user = await UserService(session).authenticate(token, now, sliding)
     if user is None:
         raise HTTPException(
             status.HTTP_401_UNAUTHORIZED, "session expired or token invalid", _CHALLENGE

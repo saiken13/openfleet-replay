@@ -80,6 +80,31 @@ jobs:
       - run: npm test
       - run: npm run build
 
+  # C++ edge agent (docs/EMBEDDED_ROADMAP.md). The runner is x86_64: native builds with
+  # sanitizers, then a real cross-compile to aarch64 whose tests run under qemu-aarch64
+  # (emulated user-mode, not ARM hardware).
+  edge:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: edge
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y ninja-build g++-aarch64-linux-gnu qemu-user
+      # TSan can't map its shadow memory with Ubuntu 24.04's default ASLR entropy.
+      - run: sudo sysctl vm.mmap_rnd_bits=28
+      - name: Native
+        run: cmake --preset native && cmake --build --preset native && ctest --preset native
+      - name: AddressSanitizer + UBSan
+        run: cmake --preset asan && cmake --build --preset asan && ctest --preset asan
+      - name: ThreadSanitizer
+        run: cmake --preset tsan && cmake --build --preset tsan && ctest --preset tsan
+      - name: Cross-compile for aarch64, run tests under qemu-aarch64
+        run: |
+          cmake --preset aarch64 && cmake --build --preset aarch64
+          file build/aarch64/edge_tests | grep -q "ARM aarch64"
+          ctest --preset aarch64
+
   collector:
     runs-on: ubuntu-latest
     strategy:

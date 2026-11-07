@@ -74,14 +74,17 @@ async def login(
             headers={"Retry-After": str(retry_after)},
         )
     ttl = timedelta(seconds=settings.session_ttl_s)
-    issued = await UserService(session).login(body.username, body.password, now, ttl)
+    max_age = timedelta(seconds=settings.session_max_s)
+    issued = await UserService(session).login(body.username, body.password, now, ttl, max_age)
     if issued is None:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "wrong username or password")
     await throttle.succeeded(body.username, ip, now)
     response.set_cookie(
         SESSION_COOKIE,
         issued.token,
-        max_age=int(settings.session_ttl_s),
+        # The browser keeps it for the session's absolute lifetime; the server decides
+        # whether it's still live (it slides, #029).
+        max_age=int(settings.session_max_s),
         httponly=True,
         secure=settings.cookie_secure,
         samesite="strict",

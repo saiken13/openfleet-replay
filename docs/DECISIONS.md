@@ -276,7 +276,7 @@ Both showed up in the first end-to-end demo.
 **Tradeoffs and migration:**
 - **Breaking API change:** every read and every WebSocket now needs a user. Create users with `openfleet users create`, and give CI and other read scripts an API token (`OPENFLEET_TOKEN`).
 - There's no login rate limiting or lockout yet. The ~50 ms hash slows guessing, but a reachable deployment should rate-limit `/auth/login` at the proxy. *(Superseded by #027: the app throttles logins itself.)*
-- Session expiry is absolute, not sliding. A user is signed out after 12 h even while active.
+- Session expiry is absolute, not sliding. A user is signed out after 12 h even while active. *(Replaced by #029: sliding sessions with a 7-day cap.)*
 - An open WebSocket can outlive its revocation by up to `WS_REAUTH_INTERVAL_S`.
 - The demo credentials are public. Never set the demo `USERS_FILE` or `LOGIN_HINT` on a reachable deployment.
 **Date:** 2026-11-05
@@ -425,4 +425,87 @@ Both showed up in the first end-to-end demo.
 - Clients that heartbeat without `ts` get server-time spans next to robot-time batches; they line up only when the robot clock is roughly right, as with BUG-003.
 - Silence before the first batch isn't replayed, as before.
 - Neither of the bundled clients heartbeats during a run except in the simulator's `telemetry_stall`; the benefit is for clients that do (e.g. a separate uplink agent).
+**Date:** 2026-11-07
+
+## 029 — Sliding sessions with an absolute maximum
+**Status:** Accepted (2026-11-07). Replaces #022's fixed 12 h session.
+**Decision:**
+- A dashboard session now expires after `SESSION_TTL_S` (12 h) **without use**, and in any case `SESSION_MAX_S` (7 days) after sign-in. At login the session row gets `expires_at = now + ttl` and a new `absolute_expires_at = now + max` (migration `0007`, `user_tokens.absolute_expires_at`).
+- Each authenticated HTTP request with a session moves `expires_at` to `min(now + ttl, absolute_expires_at)`, but only when that moves it at least `SESSION_REFRESH_S` (300 s), so a busy dashboard writes at most once per 5 minutes per session. The write is a conditional `UPDATE … WHERE expires_at < new`, so concurrent requests can't move it backwards. It's committed in `current_user` before the endpoint runs.
+- WebSocket re-checks (`WS_REAUTH_INTERVAL_S`) are read-only: an open socket alone doesn't keep a session alive. Requests do, and every reconnect reloads over REST.
+- API tokens never slide; their expiry is the one chosen at creation.
+- The cookie's `Max-Age` is now `SESSION_MAX_S`, the most a session can live. The server decides whether it's still live; with a 12 h cookie, the browser would have dropped a session the server had extended.
+- Settings validation rejects `SESSION_MAX_S < SESSION_TTL_S`.
+**Why:**
+- With a fixed 12 h lifetime, someone working all day was signed out mid-task, while a session left on a shared machine lived the same 12 h. An idle timeout plus a hard cap gives both: active users stay signed in, abandoned sessions die early, and a stolen cookie is useless after at most 7 days, however much it's used.
+- Throttling the extension keeps the read path essentially read-only; a request writes only when the expiry would move by more than 5 minutes.
+- Making WebSockets read-only means "in use" means the person did something. Otherwise a forgotten tab would keep a session alive up to the cap.
+**Alternatives considered:**
+- Reissuing a new token on each extension (rotation): limits the life of a stolen cookie further, but it needs grace windows for concurrent requests that still carry the old token. Not worth it at this threat level.
+- Recording `last_used_at` and computing expiry on read: the same write volume, plus a column to keep in sync.
+- Refreshing the cookie on every response: unnecessary once the cookie lives as long as the session can.
+**Tradeoffs:**
+- A session's real idle lifetime is up to `SESSION_REFRESH_S` shorter than `SESSION_TTL_S`, because the last extension may have been skipped.
+- Someone watching only the live dashboard (WebSocket, no clicks) is signed out after 12 h idle, as before.
+- Sessions created before `0007` have no absolute expiry: they keep their fixed expiry and don't slide.
+**Date:** 2026-11-07
+
+## 030 — Data retention: compact old runs (freeze the summary, drop the raw rows), off by default
+**Status:** Accepted (2026-11-07).
+**Decision:**
+- With `RETENTION_DAYS` set, finished runs whose `ended_at` is older than that are **compacted**. In one transaction, holding the run row lock:
+  1. The summary aggregates (the same metric, topic and event-count queries the summary endpoint runs) are frozen into `runs.summary` (JSONB, versioned).
+  2. The run's `telemetry_samples`, `topic_samples`, `heartbeat_spans` and `log` events are deleted.
+  3. `runs.compacted_at` is set (migration `0008`; partial index `ix_runs_retention` on `ended_at WHERE compacted_at IS NULL`).
+- **Kept:** the run, its incidents (with their evidence), its state-change and incident events, and `triage_actions` (#026).
+- **Readers:**
+  - `GET /runs/{id}/summary`, `/compare` and therefore `openfleet check` read the frozen aggregates for a compacted run, so the numbers are identical to before compaction.
+  - `POST /runs/{id}/redetect` returns 422 ("compacted by data retention"), not a misleading replay.
+  - `RunRead.compacted_at` is exposed, and the run page shows a notice and hides re-detection.
+  - The replay stream returns the remaining events.
+- **Where it runs:**
+  - In the sweeper tick, so under its advisory lock (#024), at most once per `RETENTION_INTERVAL_S` (1 h) per process and at most `RETENTION_BATCH_RUNS` (20) runs per pass.
+  - `openfleet retention --days N [--dry-run] [--json] [--limit]` (direct database access, like `openfleet keys`) for previews and one-off cleanups.
+- **Off by default** (`RETENTION_DAYS` unset), including in compose: deleting data must be an explicit choice.
+**Why:**
+- Per-second samples are almost all of the data (ARCHITECTURE §10), and their value decays: after a few weeks a run matters for its outcome, its incidents and as a regression baseline, not for second-by-second charts.
+- Freezing the aggregates before deleting keeps the CI story working. `openfleet check --baseline OLD_RUN` gives exactly the same verdict after compaction, which plain deletion (empty summaries) or downsampling (shifted percentiles and minimums) would not.
+- The incident record and the audit trail are small and are the long-term memory; they're never touched.
+- Per-run transactions keep each lock short and make compaction all-or-nothing and idempotent (a compacted run is skipped).
+**Alternatives considered:**
+- Downsampling (keep 1 sample per N s): charts survive, but `check` results drift, and the tables still grow linearly.
+- Time partitioning or TimescaleDB with drop-chunk policies: the right tool at scale (still the evolution path in §10), but new infrastructure and per-time rather than per-run semantics, which would cut runs in half.
+- Deleting whole runs: loses incidents and baselines.
+- A separate cron container: one more moving part; the sweeper already runs exactly once per interval across replicas.
+**Tradeoffs:**
+- A compacted run's replay and incident charts have no samples, only events. That's stated on the page.
+- `ended_at` is the robot's clock (like every run time); a robot with a badly wrong clock is compacted early or late.
+- Retention frees rows, but Postgres only returns the disk space after (auto)vacuum. That's fine for steady state; a big one-off cleanup may want a manual `VACUUM`.
+- Frozen summaries don't change if summary queries are later improved; `summary.version` exists to tell old freezes apart.
+**Date:** 2026-11-07
+
+## 031 — Embedded toolchain: one Linux dev container, CMake presets, cross builds run under qemu-user, Renode native on arm64
+**Status:** Accepted (2026-11-07). Phase 0 of [EMBEDDED_ROADMAP](EMBEDDED_ROADMAP.md).
+**Decision:**
+- All C/C++ and emulator work happens in one Ubuntu 24.04 container (`edge/docker/Dockerfile.dev`, run with `scripts/edge-dev.sh`). It holds gcc 13, clang 18, gdb 15, valgrind 3.22, CMake 3.28, Ninja, a cross g++ for the *other* architecture, qemu-user 8.2 and Renode 1.17.0 (the portable build for the image's architecture).
+- `edge/` is a CMake project with presets: `native`, `release`, `asan` (ASan+UBSan), `tsan`, `aarch64`, `x86_64`. The cross toolchain files set `CMAKE_CROSSCOMPILING_EMULATOR` to `qemu-<arch> -L /usr/<arch>-linux-gnu`, so `ctest` runs the cross-built tests through user-mode emulation. GoogleTest is fetched by CMake, pinned by SHA-256. Warnings are errors, for our own targets only.
+- CI job `edge` on the x86_64 runner: native, ASan+UBSan, TSan (with `vm.mmap_rnd_bits=28`, which Ubuntu 24.04 needs for TSan), then a real **x86_64 → aarch64 cross-compile**, checked with `file`, whose tests run under `qemu-aarch64`.
+- `firmware/renode/smoke.sh` boots an emulated STM32F4 Discovery and checks that its UART4 output arrives over TCP. This is the transport Phase 3 will use between the firmware and the agent.
+**Why:**
+- The dev Mac is arm64, and Docker on it runs linux/arm64 natively, so "ARM64 under QEMU" would be meaningless locally. The meaningful cross-compile is in CI, from x86_64. Locally the mirror image (arm64 → x86_64 under `qemu-x86_64`) exercises the same toolchain mechanism.
+- gdb and valgrind don't run on Apple Silicon macOS; Linux-only APIs (`/proc`, `epoll`, ptys) are what the agent targets anyway. One container gives the same tools locally and in CI.
+- Renode spike result (the roadmap's main risk): 1.17.0 ships `linux-arm64-portable`. It ran natively in the arm64 container, booted Antmicro's STM32F4 Contiki demo, and its UART4 came out on a TCP socket. The STM32F4 platform also models the independent watchdog (`STM32_IndependentWatchdog`), which Phase 3 needs. No fallback needed.
+- The first real component, `BoundedQueue`, replaces a hello-world placeholder. It's what the agent's threads share, so TSan has a real target from day one.
+**Verified:**
+- In the arm64 container: native, asan, tsan and x86_64 cross presets all pass (7 tests each).
+- Seeded bugs: a data race reported by TSan, a heap overflow reported by ASan, so passing sanitizer runs mean something here.
+- The CI job's exact commands, replayed in an emulated linux/amd64 container: native passes; the aarch64 cross build produces an `ARM aarch64` ELF; its tests pass under `qemu-aarch64`.
+**Alternatives considered:**
+- Building on macOS directly with Homebrew: no gdb, no valgrind, no Linux APIs, and a different toolchain from CI.
+- A full-system QEMU ARM64 VM for development: slower and heavier, with nothing user-mode emulation doesn't already cover for unit tests. It stays an optional Phase 4 item, for systemd deployment.
+- Wokwi: its CLI needs a cloud token; Renode is local and open source.
+**Tradeoffs:**
+- `renode`'s console exits at the end of its input, so scripts hold stdin open (`sleep infinity | renode …`).
+- The smoke test downloads Antmicro's prebuilt demo ELF, so it's not in CI (an external dependency). Phase 3 replaces it with our own firmware and a CI job.
+- qemu-user results say nothing about performance on real ARM hardware.
 **Date:** 2026-11-07

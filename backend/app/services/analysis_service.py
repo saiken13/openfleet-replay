@@ -23,6 +23,7 @@ from app.schemas.analysis import (
 )
 from app.schemas.incident import IncidentRead
 from app.schemas.run import RunRead
+from app.services.retention_service import frozen_metrics
 
 # Merged stream order: (ts, kind rank, id). Samples first at equal ts, then topics, events.
 _SOURCES: tuple[tuple[type[TelemetrySample] | type[TopicSample] | type[Event], int], ...] = (
@@ -69,7 +70,15 @@ class AnalysisService:
 
     async def summary(self, run_id: uuid.UUID) -> RunSummary:
         run = await self._run(run_id)
-        m = await self.analysis.metrics(run_id)
+        if run.compacted_at is not None and run.summary is not None:
+            # Retention removed the raw rows; these are their aggregates, frozen (#030).
+            m = frozen_metrics(run.summary)
+            topic_rows = run.summary["topics"]
+            event_counts = run.summary["events"]
+        else:
+            m = await self.analysis.metrics(run_id)
+            topic_rows = await self.analysis.topics(run_id)
+            event_counts = await self.analysis.event_counts(run_id)
         end = run.ended_at or m["last_ts"]
         duration = (end - run.started_at).total_seconds() if end else None
         incidents = await self.incidents.search(
@@ -115,11 +124,11 @@ class AnalysisService:
                         )
                     },
                 )
-                for t in await self.analysis.topics(run_id)
+                for t in topic_rows
             ],
             incidents_by_severity=by_sev,
             incidents=[IncidentRead.model_validate(i) for i in reversed(incidents)],
-            events_by_type=await self.analysis.event_counts(run_id),
+            events_by_type=event_counts,
         )
 
     async def compare(self, base_id: uuid.UUID, candidate_id: uuid.UUID) -> RunComparison:

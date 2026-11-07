@@ -57,6 +57,14 @@ class IssuedToken:
     token: str  # the only time the plaintext exists server-side
 
 
+@dataclass(frozen=True)
+class Sliding:
+    """How use extends a session (DECISIONS #029)."""
+
+    ttl: timedelta  # idle lifetime
+    refresh: timedelta  # extend only when it moves the expiry at least this far
+
+
 class UserService:
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
@@ -64,13 +72,30 @@ class UserService:
 
     # --- authentication ----------------------------------------------------------------
 
-    async def authenticate(self, token: str, now: datetime) -> User | None:
-        """The user a session/API token belongs to, if the token is live. Read-only."""
+    async def authenticate(
+        self, token: str, now: datetime, sliding: Sliding | None = None
+    ) -> User | None:
+        """The user a session/API token belongs to, if the token is live. With `sliding`, a
+        session's expiry moves to `now + ttl`, capped at its absolute expiry (#029), and
+        that is committed. Without it (WebSocket re-checks), this is read-only."""
         found = await self.users.active_token(hash_token(token), now)
-        return found[1] if found is not None else None
+        if found is None:
+            return None
+        row, user = found
+        if sliding is not None and row.absolute_expires_at is not None:
+            target = min(now + sliding.ttl, row.absolute_expires_at)
+            if row.expires_at is not None and target - row.expires_at >= sliding.refresh:
+                await self.users.extend_token(row.id, target)
+                await self.session.commit()
+        return user
 
     async def login(
-        self, username: str, password: str, now: datetime, ttl: timedelta
+        self,
+        username: str,
+        password: str,
+        now: datetime,
+        ttl: timedelta,
+        max_age: timedelta | None = None,
     ) -> IssuedToken | None:
         """A new session for valid credentials, else None. Unknown users, wrong passwords
         and disabled users are indistinguishable, in content and in timing."""
@@ -83,7 +108,10 @@ class UserService:
         ok = await asyncio.to_thread(passwords.verify_password, password, stored)
         if user is None or not ok or user.disabled_at is not None:
             return None
-        issued = await self._issue(user, TokenKind.SESSION, SESSION_PREFIX, None, now + ttl)
+        absolute = now + max(max_age or ttl, ttl)  # max_age None: a fixed-length session
+        issued = await self._issue(
+            user, TokenKind.SESSION, SESSION_PREFIX, None, now + ttl, absolute
+        )
         await self.session.commit()
         return issued
 
@@ -202,10 +230,17 @@ class UserService:
         prefix: str,
         label: str | None,
         expires_at: datetime | None,
+        absolute_expires_at: datetime | None = None,
     ) -> IssuedToken:
         token = prefix + secrets.token_urlsafe(32)
         row = await self.users.insert_token(
-            user.id, kind, hash_token(token), token[:DISPLAY_PREFIX_LENGTH], label, expires_at
+            user.id,
+            kind,
+            hash_token(token),
+            token[:DISPLAY_PREFIX_LENGTH],
+            label,
+            expires_at,
+            absolute_expires_at,
         )
         assert row is not None  # a fresh 256-bit token never collides
         return IssuedToken(row=row, token=token)

@@ -1,0 +1,32 @@
+# Development container for the embedded work (docs/EMBEDDED_ROADMAP.md): one Linux image
+# with the native compilers, debuggers, a cross compiler for the *other* architecture, qemu
+# user-mode to run those cross builds, and Renode for the emulated microcontroller.
+#
+#   docker build -t openfleet-edge-dev -f edge/docker/Dockerfile.dev edge/docker
+#   scripts/edge-dev.sh cmake --preset native   (see that script)
+#
+# On an Apple Silicon Mac this image is linux/arm64: native = aarch64, cross = x86_64.
+# On a typical CI runner it's linux/amd64: native = x86_64, cross = aarch64.
+FROM ubuntu:24.04
+
+ARG TARGETARCH
+ARG RENODE_VERSION=1.17.0
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential cmake ninja-build clang lld gdb valgrind \
+        git curl ca-certificates python3 pkg-config file \
+        libcurl4-openssl-dev qemu-user \
+    && if [ "$TARGETARCH" = "arm64" ]; then cross=g++-x86-64-linux-gnu; \
+       else cross=g++-aarch64-linux-gnu; fi \
+    && apt-get install -y --no-install-recommends "$cross" \
+    && rm -rf /var/lib/apt/lists/*
+
+# Renode: the portable build for this image's architecture (verified on arm64 in Phase 0).
+RUN if [ "$TARGETARCH" = "arm64" ]; then pkg=linux-arm64-portable; else pkg=linux-portable; fi \
+    && curl -fsSL "https://github.com/renode/renode/releases/download/v${RENODE_VERSION}/renode-${RENODE_VERSION}.${pkg}.tar.gz" \
+       | tar xz -C /opt \
+    && ln -s /opt/renode_${RENODE_VERSION}-portable /opt/renode \
+    && ln -s /opt/renode/renode /usr/local/bin/renode
+
+WORKDIR /src

@@ -6,13 +6,14 @@ import asyncio
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.config import Settings
 from app.realtime.hub import Hub
 from app.services.liveness_service import LivenessService
+from app.services.retention_service import RetentionService
 from app.workers.lock import AdvisoryLock
 
 log = logging.getLogger(__name__)
@@ -22,6 +23,7 @@ log = logging.getLogger(__name__)
 class TickResult:
     marked: list[str] = field(default_factory=list)
     aborted_runs: list[str] = field(default_factory=list)
+    compacted_runs: list[str] = field(default_factory=list)
     skipped: bool = False  # another replica held the lock
 
 
@@ -40,6 +42,7 @@ class Sweeper:
         self.settings = settings
         self.clock = clock
         self.lock = lock
+        self._next_retention: datetime | None = None  # per process; at most once per interval
 
     async def tick(self, now: datetime | None = None) -> TickResult:
         """One pass. `now` is injectable so tests don't depend on wall-clock time."""
@@ -56,7 +59,23 @@ class Sweeper:
             svc = LivenessService(session, self.hub, self.settings)
             marked = await svc.mark_stale_offline(now)
             aborted = await svc.abort_abandoned_runs(now)
-        return TickResult(marked=marked, aborted_runs=aborted)
+        return TickResult(
+            marked=marked, aborted_runs=aborted, compacted_runs=await self._retention(now)
+        )
+
+    async def _retention(self, now: datetime) -> list[str]:
+        """DECISIONS #030. Runs inside the tick, so under the same advisory lock."""
+        s = self.settings
+        if s.retention_days is None:
+            return []
+        if self._next_retention is not None and now < self._next_retention:
+            return []
+        self._next_retention = now + timedelta(seconds=s.retention_interval_s)
+        async with self.sessionmaker() as session:
+            done = await RetentionService(session).run(
+                now, timedelta(days=s.retention_days), s.retention_batch_runs
+            )
+        return [str(c.run_id) for c in done]
 
     async def run_forever(self) -> None:
         log.info("sweeper started (interval %.1fs)", self.settings.sweep_interval_s)
@@ -71,6 +90,8 @@ class Sweeper:
                         result.marked,
                         result.aborted_runs,
                     )
+                if result.compacted_runs:
+                    log.info("retention: compacted %d runs", len(result.compacted_runs))
             except asyncio.CancelledError:
                 raise
             except Exception:  # keep sweeping; one bad tick must not stop liveness checks

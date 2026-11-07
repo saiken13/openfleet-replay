@@ -1,7 +1,7 @@
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -23,7 +23,12 @@ class Settings(BaseSettings):
     # Users (DECISIONS #022). Optional JSON {username: {password, role, token?}} seeded at
     # startup, demo/dev only; real deployments use `openfleet users create`.
     users_file: Path | None = None
+    # Sessions (DECISIONS #029): a session expires after SESSION_TTL_S without use, and in
+    # any case SESSION_MAX_S after sign-in. Use extends it at most once per SESSION_REFRESH_S
+    # (so a busy dashboard doesn't write on every request).
     session_ttl_s: float = Field(12 * 3600, gt=0)
+    session_max_s: float = Field(7 * 24 * 3600, gt=0)
+    session_refresh_s: float = Field(300.0, ge=0)
     cookie_secure: bool = False  # set true behind HTTPS
     login_hint: str | None = None  # shown on the login page (e.g. demo credentials)
     ws_reauth_interval_s: float = Field(30.0, gt=0)  # live sockets re-check their session
@@ -46,6 +51,12 @@ class Settings(BaseSettings):
     redis_url: str | None = None
     run_abandon_after_s: float = Field(60.0, gt=0)
 
+    # Retention (DECISIONS #030). Unset: keep everything. Otherwise finished runs that ended
+    # more than this many days ago are compacted: summary frozen, raw telemetry deleted.
+    retention_days: float | None = Field(None, gt=0)
+    retention_interval_s: float = Field(3600.0, gt=0)  # how often the sweeper looks
+    retention_batch_runs: int = Field(20, gt=0)  # runs compacted per pass
+
     # Incidents
     incident_resolve_after_s: float = Field(10.0, ge=0)
     timeline_lookback_s: float = Field(60.0, ge=0)
@@ -62,6 +73,12 @@ class Settings(BaseSettings):
     mem_high_pct: float = 90.0
     battery_low_pct: float = 25.0
     battery_critical_pct: float = 10.0
+
+    @model_validator(mode="after")
+    def _session_bounds(self) -> "Settings":
+        if self.session_max_s < self.session_ttl_s:
+            raise ValueError("session_max_s must be at least session_ttl_s")
+        return self
 
 
 @lru_cache

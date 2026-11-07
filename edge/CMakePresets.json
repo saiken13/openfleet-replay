@@ -1,0 +1,53 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": {"major": 3, "minor": 25, "patch": 0},
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {"CMAKE_BUILD_TYPE": "Debug"}
+    },
+    {"name": "native", "inherits": "base", "displayName": "Native (host architecture)"},
+    {
+      "name": "release", "inherits": "base", "displayName": "Native, optimized",
+      "cacheVariables": {"CMAKE_BUILD_TYPE": "RelWithDebInfo"}
+    },
+    {
+      "name": "asan", "inherits": "base", "displayName": "AddressSanitizer + UBSan",
+      "cacheVariables": {"EDGE_SANITIZE": "address,undefined"}
+    },
+    {
+      "name": "tsan", "inherits": "base", "displayName": "ThreadSanitizer",
+      "cacheVariables": {"EDGE_SANITIZE": "thread"}
+    },
+    {
+      "name": "aarch64", "inherits": "base",
+      "displayName": "Cross-compile for aarch64 Linux (tests run under qemu-aarch64)",
+      "toolchainFile": "${sourceDir}/cmake/toolchains/aarch64-linux-gnu.cmake"
+    },
+    {
+      "name": "x86_64", "inherits": "base",
+      "displayName": "Cross-compile for x86_64 Linux (tests run under qemu-x86_64)",
+      "toolchainFile": "${sourceDir}/cmake/toolchains/x86_64-linux-gnu.cmake"
+    }
+  ],
+  "buildPresets": [
+    {"name": "native", "configurePreset": "native"},
+    {"name": "release", "configurePreset": "release"},
+    {"name": "asan", "configurePreset": "asan"},
+    {"name": "tsan", "configurePreset": "tsan"},
+    {"name": "aarch64", "configurePreset": "aarch64"},
+    {"name": "x86_64", "configurePreset": "x86_64"}
+  ],
+  "testPresets": [
+    {"name": "base", "hidden": true, "output": {"outputOnFailure": true}},
+    {"name": "native", "inherits": "base", "configurePreset": "native"},
+    {"name": "release", "inherits": "base", "configurePreset": "release"},
+    {"name": "asan", "inherits": "base", "configurePreset": "asan"},
+    {"name": "tsan", "inherits": "base", "configurePreset": "tsan"},
+    {"name": "aarch64", "inherits": "base", "configurePreset": "aarch64"},
+    {"name": "x86_64", "inherits": "base", "configurePreset": "x86_64"}
+  ]
+}

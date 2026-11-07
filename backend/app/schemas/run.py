@@ -36,6 +36,7 @@ class RunRead(BaseModel):
     status: RunStatus
     started_at: datetime
     ended_at: datetime | None
+    compacted_at: datetime | None = None  # retention removed its raw telemetry (#030)
 
 
 class RunPage(BaseModel):
