@@ -357,3 +357,22 @@ Both showed up in the first end-to-end demo.
 - The first publish after a Redis restart can fail on a stale pooled connection. It's counted as lost, and the gap check repairs it.
 - Every replica receives every message, whether or not it has subscribers for those channels. At fleet scale this would become per-channel Redis subscriptions.
 **Date:** 2026-11-06
+
+## 026 — Triage audit log: its own append-only table, not derived from events
+**Status:** Accepted (2026-11-06).
+**Decision:**
+- Every manual incident status change (`PATCH /incidents/{id}`) inserts a `triage_actions` row: `incident_id`, `robot_id`, `actor` (username), `from_status`, `to_status`, `at` (server time). It's in the same transaction as the change. No-ops (already in that status) and rejected changes (409) record nothing.
+- `GET /api/v1/triage?actor=&robot_id=&incident_id=&limit=&cursor=` (viewer role) lists actions newest first, with each incident's title. The cursor is the last row's id. The dashboard's **Audit** page (`/triage`) shows it, and each incident page links to its own history.
+- Migration `0005` backfills manual resolutions already recorded as `incident_resolved` events (`reason = manual`). Their `from_status` is NULL (never recorded), and so is `actor` when the resolve predates auth.
+- The `incident_resolved` event still carries the actor, so the robot timeline is unchanged.
+**Why:**
+- Before this, only manual *resolves* recorded the actor, and only inside an event payload. INVESTIGATING left no trace at all.
+- Events are robot telemetry and will be subject to retention (the planned data-retention work). An audit trail must outlive that, so it gets a small table of its own that retention doesn't touch.
+- One row per change, written in the same transaction, can't drift from the incident's status.
+**Alternatives considered:**
+- Emitting an event for INVESTIGATING and querying `events` by type: no new table, but the audit would then depend on telemetry retention, and querying JSONB payloads by actor needs an expression index.
+- A generic audit table for every write (users, keys, triage): more general than anything needs today. User and key management happen through the CLI on the server.
+**Tradeoffs:**
+- The actor is a username, not a user id. Usernames are unique, users are disabled rather than deleted, and there's no rename. If renames are ever added, store the user id as well.
+- Auto-resolves (hysteresis, run end) aren't triage and aren't in this log. They remain events.
+**Date:** 2026-11-06

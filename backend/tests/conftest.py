@@ -301,6 +301,7 @@ async def purge_robots(session: AsyncSession, prefix: str) -> None:
         TelemetrySample,
         TopicSample,
         TopicState,
+        TriageAction,
         User,
         UserToken,
     )
@@ -309,6 +310,7 @@ async def purge_robots(session: AsyncSession, prefix: str) -> None:
     await session.execute(delete(UserToken).where(UserToken.user_id.in_(users)))
     await session.execute(delete(User).where(User.username.startswith(prefix)))
     for model in (
+        TriageAction,
         Incident,
         Event,
         TopicSample,

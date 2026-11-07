@@ -101,6 +101,9 @@ export function IncidentPage() {
           <Row k="Started">{fmtDateTime(inc.started_at)}</Row>
           <Row k="Last detected">{fmtDateTime(inc.last_detected_at)}</Row>
           <Row k="Resolved">{fmtDateTime(inc.resolved_at)}</Row>
+          <Row k="Triage">
+            <Link to={`/triage?incident_id=${inc.id}`} className="text-cyan-400 hover:underline">history</Link>
+          </Row>
           <Row k="Duration">
             {fmtDuration(((inc.resolved_at ? Date.parse(inc.resolved_at) : Date.now()) - Date.parse(inc.started_at)) / 1000)}
           </Row>

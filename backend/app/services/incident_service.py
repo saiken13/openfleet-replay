@@ -12,6 +12,7 @@ from app.repositories.event_repository import EventRepository
 from app.repositories.incident_repository import IncidentRepository
 from app.repositories.robot_repository import RobotRepository
 from app.repositories.telemetry_repository import TelemetryRepository
+from app.repositories.triage_repository import TriageRepository
 from app.schemas.incident import IncidentRead, IncidentTimeline
 from app.schemas.telemetry import EventRead, SampleRead, TopicSampleRead
 from app.services.base import Service
@@ -57,7 +58,8 @@ class IncidentService(Service):
     ) -> Incident:
         """Manual triage: OPEN -> INVESTIGATING, or resolve by hand. Resolved is final; if the
         condition persists, detection opens a *new* incident. `actor` (the signed-in
-        operator) is recorded on the resolution event."""
+        operator) is recorded in the triage audit log (DECISIONS #026) and on the resolution
+        event. A no-op (already in that status) records nothing."""
         unlocked = await self.get(incident_id)
         robot = await self.robots.get(unlocked.robot_id, for_update=True)  # robot first
         inc = await self.incidents.get(incident_id, for_update=True)
@@ -68,6 +70,9 @@ class IncidentService(Service):
         if inc.status == IncidentStatus.RESOLVED:
             raise ConflictError(f"incident {incident_id} is already RESOLVED")
 
+        await TriageRepository(self.session).record(
+            incident=inc, actor=actor, from_status=inc.status, to_status=status, at=now
+        )
         inc.status = status
         inc.updated_at = now
         if status == IncidentStatus.RESOLVED:

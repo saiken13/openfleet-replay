@@ -15,6 +15,7 @@ import type {
   Sample,
   TopicSample,
   TopicState,
+  TriagePage,
 } from "./types";
 
 import { CLIENT_HEADER, notifyUnauthorized, type User } from "../lib/auth";
@@ -94,6 +95,9 @@ export const api = {
   timeline: (id: string) => request<IncidentTimeline>(`/incidents/${id}/timeline`),
   setIncidentStatus: (id: string, status: Exclude<IncidentStatus, "OPEN">) =>
     request<Incident>(`/incidents/${id}`, { method: "PATCH", body: JSON.stringify({ status }) }),
+  triage: (
+    params: { actor?: string; robot_id?: string; incident_id?: string; limit?: number; cursor?: string | null } = {},
+  ) => request<TriagePage>(`/triage${qs(params)}`),
 };
 
 /** Fetch every page of a run's replay stream. */

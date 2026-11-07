@@ -268,3 +268,26 @@ class UserToken(Base):
     created_at: Mapped[datetime] = mapped_column(TZ, server_default=func.now())
     expires_at: Mapped[datetime | None] = mapped_column(TZ)
     revoked_at: Mapped[datetime | None] = mapped_column(TZ)
+
+
+class TriageAction(Base):
+    """Audit log of manual incident triage (DECISIONS #026): one row per status change an
+    operator makes. Append-only, and kept apart from `events` so telemetry retention never
+    erases who did what."""
+
+    __tablename__ = "triage_actions"
+    __table_args__ = (
+        enum_check("to_status", IncidentStatus, "to_status"),
+        enum_check("from_status", IncidentStatus, "from_status"),
+        Index("ix_triage_actions_incident_id", "incident_id"),
+        Index("ix_triage_actions_actor_id", "actor", "id"),
+        Index("ix_triage_actions_robot_id_id", "robot_id", "id"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)  # also the paging order
+    incident_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("incidents.id"))
+    robot_id: Mapped[str] = mapped_column(Text, ForeignKey("robots.id"))
+    actor: Mapped[str | None] = mapped_column(Text)  # username; NULL only on backfilled rows
+    from_status: Mapped[str | None] = mapped_column(Text)  # NULL only on backfilled rows
+    to_status: Mapped[str] = mapped_column(Text)
+    at: Mapped[datetime] = mapped_column(TZ)  # server time

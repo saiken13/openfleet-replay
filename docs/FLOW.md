@@ -50,7 +50,7 @@ Any read: app/api/auth.py :: current_user()   (via require_viewer / require_oper
     ├─ Bearer header (API token) or else the session cookie   → none: 401
     ├─ UserRepository.active_token(sha256, now)    not revoked, not expired, user not disabled → else 401
     ├─ cookie + unsafe method without X-OpenFleet-Client → 403 (CSRF)
-    └─ require_operator: role < OPERATOR → 403      (PATCH /incidents/{id}; actor recorded on the event)
+    └─ require_operator: role < OPERATOR → 403      (PATCH /incidents/{id}; actor recorded in triage_actions and on the event)
 
 WebSocket: app/api/v1/ws.py :: _pump()
     ├─ Bearer or cookie; cookie needs an allowed Origin (CORS_ORIGINS or same host); valid token
@@ -175,7 +175,9 @@ backend/app/services/detection_service.py :: Detector.evaluate(robot, now)     (
 → _apply_status()               derive_robot_status() (backend/app/domain/status.py); robot_status_changed on change
 
 Run ended by the robot → Detector.resolve_run_incidents()  (reason "run ended", #017)
-Manual triage → PATCH /api/v1/incidents/{id} → IncidentService.update_status() → re-evaluate robot status
+Manual triage → PATCH /api/v1/incidents/{id} → IncidentService.update_status()
+    → TriageRepository.record() (triage_actions row: actor, from → to; #026) → re-evaluate robot status
+Audit log → GET /api/v1/triage (backend/app/api/v1/triage.py) → frontend/src/pages/TriagePage.tsx
 ```
 
 ## 4. Incident timeline

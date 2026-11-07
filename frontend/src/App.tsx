@@ -9,6 +9,7 @@ import { IncidentsPage } from "./pages/IncidentsPage";
 import { RobotPage } from "./pages/RobotPage";
 import { RunPage } from "./pages/RunPage";
 import { RunsPage } from "./pages/RunsPage";
+import { TriagePage } from "./pages/TriagePage";
 
 const ConnectionContext = createContext<(s: SocketState | null) => void>(() => {});
 
@@ -26,6 +27,7 @@ const NAV = [
   ["/incidents", "Incidents"],
   ["/runs", "Runs"],
   ["/compare", "Compare"],
+  ["/triage", "Audit"],
 ] as const;
 
 function UserMenu() {
@@ -88,6 +90,7 @@ export default function App() {
           <Route path="/runs" element={<RunsPage />} />
           <Route path="/runs/:runId" element={<RunPage />} />
           <Route path="/compare" element={<ComparePage />} />
+          <Route path="/triage" element={<TriagePage />} />
           <Route path="*" element={<div className="text-slate-400">Not found.</div>} />
         </Routes>
       </main>

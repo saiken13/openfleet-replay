@@ -7,23 +7,25 @@
 - **Latest commit:** see `git log -1`
 
 ## Current state
+**Triage audit log done (2026-11-06, DECISIONS #026).** Every manual incident status change writes a `triage_actions` row (actor, from → to, server time) in the same transaction (`app/repositories/triage_repository.py`, hooked in `IncidentService.update_status`). `GET /api/v1/triage` (viewer; filters actor/robot_id/incident_id, id cursor) feeds the dashboard's **Audit** page (`frontend/src/pages/TriagePage.tsx`); incident pages link to their own history. Migration `0005` backfills older manual resolves from `incident_resolved` events (actor/from may be NULL). Tests: `tests/test_triage_audit.py`. Verified live: demo operator INVESTIGATING → RESOLVED on a real incident, both rows on the page (screenshot via headless Chrome).
+
 **Realtime fan-out across replicas done (2026-11-06, DECISIONS #025).** With `OPENFLEET_REDIS_URL` set (compose sets it), `app/realtime/bus.py :: RedisBus` forwards hub messages over Redis pub/sub. Delivery is local-first, own echoes are skipped, and per-instance seq numbers plus a heartbeat detect loss. On a gap or a (re)subscribe the replica calls `Hub.resync()`, so its WebSockets close with 1012 and clients reload over REST (no frontend change).
 - Tests: `tests/test_realtime_bus.py` (5 pure seq-logic tests and 4 against real Redis, skipped locally if Redis isn't on 6380, required in CI), plus hub forward/deliver/resync and WS 1012 tests in `tests/test_realtime.py`.
 - Verified live with two replicas (`:8000` and a second container on `:8001`): a heartbeat through either replica updated a fleet WebSocket on the other. `CLIENT KILL TYPE pubsub` closed both sockets with 1012 and they resubscribed. With Redis stopped, the backend kept serving, and it recovered on restart.
-- **Together with #024, several backend replicas can run.** There's no compose profile with 2 replicas behind nginx yet; the check was done by hand (see Gotchas).
+- **Together with #024, several backend replicas can run.** `docker compose --profile replicas up` adds `backend-2` (:8001) and a round-robin nginx `lb` (:8090, `scripts/lb.nginx.conf`); `python scripts/multi_replica_e2e.py` checks cross-replica delivery both ways, delivery through the lb, and the 1012 path after `CLIENT KILL TYPE pubsub`. CI runs it as `e2e-multi-replica`.
 
 **Sweeper is replica-safe (2026-11-06, DECISIONS #024).** Each tick takes a session-level `pg_try_advisory_lock` on its own connection (`app/workers/lock.py`); replicas that miss it skip the tick. Tests: `tests/test_sweeper_lock.py` (exclusion, release on error and on cancel, sweeper skip). Verified live with a second backend replica on the compose DB: while psql held the sweeper's key, neither replica marked a silent robot offline (the replica logged 12 skips), and the robot went OFFLINE within one interval of release.
 
 **Re-detection replay done (2026-11-06, DECISIONS #023).** `POST /runs/{id}/redetect` runs the current rules (or overridden thresholds) over a recorded run and compares with the recorded incidents: caught / missed / new.
 - Pure engine `app/detection/replay.py`, service `app/services/redetect_service.py`, run-page panel `frontend/src/components/RedetectPanel.tsx`, CLI `openfleet redetect RUN [--set k=v] [--fail-on-missed] [--json]`.
 - Verified with all suites and on the live compose stack through nginx (viewer cookie, CSRF 403), on `lidar_regression` and all `demo` robots. On a `--fast` demo run it found the amr-04 offline window that live detection missed (fast mode compresses server time; replay uses robot time).
-- Not committed yet (neither is auth) unless `git log` shows it. The panel was built and typechecked but not looked at in a browser.
+- Committed (68ca0cc / a201405). The panel was built and typechecked but not looked at in a browser.
 
 **Auth done (2026-11-05), steps 1–4.**
 - Per-robot API keys on robot writes (DECISIONS #021).
 - Users with viewer/operator roles, a dashboard login (HttpOnly session cookie), API tokens for the CLI/CI, auth on every read, and authenticated WebSockets (DECISIONS #022).
 - Verified with all suites, the live compose stack through nginx (cookie, CSRF header, roles, WS Origin, logout), the CI regression gate run locally with `OPENFLEET_TOKEN`, and the ROS 2 Jazzy e2e.
-- Not committed yet unless `git log` shows it.
+- Committed (68ca0cc / a201405).
 
 **ROS 2 collector done (2026-11-06).** `collector/` runs on real ROS 2 and is verified end to end on Jazzy in CI. Earlier summary below.
 
@@ -31,7 +33,7 @@
 - Docker Compose: Postgres + backend + nginx frontend + simulator
 - Screenshots taken of the fleet, incident and replay pages
 
-CI has four jobs: backend, simulator, frontend, and `e2e-regression-check`.
+CI jobs: backend, simulator, frontend, collector, ros2-collector-e2e, `e2e-regression-check` (threshold check plus the re-detection gate) and `e2e-multi-replica`.
 
 ## Completed
 - **Backend** (`backend/app/`):
@@ -54,11 +56,11 @@ CI has four jobs: backend, simulator, frontend, and `e2e-regression-check`.
   - Modes: real time, `--fast`, and `--loop`.
 - **Frontend** (`frontend/`): fleet, robot (live), incidents, incident detail (charts, timeline, first signal, triage), runs, run replay, and compare.
 - **Tests:**
-  - Backend: 214 (incl. 9 bus tests, 4 sweeper-lock tests, 15 pure replay-engine tests and 8 redetect API tests), against real Postgres, including concurrency races and mutation-checked guards. Auth tests: `tests/test_auth.py` (robots), `tests/test_user_auth.py` (users, with a route-coverage test), the WS auth in `tests/test_realtime.py`, and the CLI in `tests/test_cli.py`.
+  - Backend: 219 (incl. 4 triage-audit tests, 9 bus tests, 4 sweeper-lock tests, 15 pure replay-engine tests and 8 redetect API tests), against real Postgres, including concurrency races and mutation-checked guards. Auth tests: `tests/test_auth.py` (robots), `tests/test_user_auth.py` (users, with a route-coverage test), the WS auth in `tests/test_realtime.py`, and the CLI in `tests/test_cli.py`.
   - Simulator: 13.
   - Collector: 24.
   - Frontend: 17 (reducer, ReplayClock, auth helpers, redetect overrides).
-- **Docs:** README, ARCHITECTURE, FLOW (real file:function paths), DECISIONS 001–025, BUGS 001–003, CONSTRAINTS.
+- **Docs:** README, ARCHITECTURE, FLOW (real file:function paths), DECISIONS 001–026, BUGS 001–003, CONSTRAINTS.
 
 ## Currently working
 Nothing in progress.
@@ -76,7 +78,7 @@ None open. Fixed bugs are recorded in docs/BUGS.md.
   - Postgres is on host port **5433**, because the owner's Mac runs Homebrew Postgres on 5432.
   - Dashboard on **8080** (nginx); dev server on 5173.
   - Redis on host port **6380** (compose). Bus integration tests use `redis://localhost:6380/15` (`OPENFLEET_TEST_REDIS_URL`) and skip if it's down, so run `docker compose up -d redis` before the tests.
-- **Second replica by hand:** `docker compose run -d --no-deps --name ofr-replica2 -p 8001:8000 backend`, then `docker rm -f ofr-replica2`. The script used for the fan-out check opens `/ws/fleet` on both ports with the demo viewer token and heartbeats through the other port.
+- **Second replica:** `docker compose --profile replicas up -d --build --wait` (backend-2 on :8001, lb on :8090), then `python scripts/multi_replica_e2e.py`. Stop with `docker compose --profile replicas down` (a plain `docker compose down` leaves the profile's containers running). The script fails, as it should, if Redis is stopped.
 - **Bus semantics:** never call `hub.deliver` for locally produced messages (that skips forwarding), and never `hub.publish` something received from the bus (that re-forwards it).
 - **Lock order:** robot → runs → incidents, everywhere.
 - **Realtime publishing:** services must publish only through `Service.commit()` / `publish_after_commit()`.
@@ -88,7 +90,9 @@ None open. Fixed bugs are recorded in docs/BUGS.md.
 - **Alembic in tests:** runs through `run_in_fresh_thread()`.
 - **Enum changes:** changing a `StrEnum` needs a migration that updates the CHECK constraint (#015).
 - **Clocks:** incident times are server time and frame times are robot time. They're aligned when robot clocks are roughly correct, which the simulator ensures in real-time mode (BUG-003).
-- **Fast mode:** in `openfleet-sim --fast`, incidents don't auto-resolve within the run, because hysteresis uses server time. This is expected.
+- **Fast mode:** in `openfleet-sim --fast`, incidents don't auto-resolve *by hysteresis* within the run (it uses server time), but they still resolve when the run ends (#017), so a finished fast run leaves nothing open. To triage a live incident by hand, run `simulator/.venv/bin/openfleet-sim -s simulator/scenarios/lidar_regression.yaml --keys examples/demo-robot-keys.json` in real time (60 s).
+- **Simulator binary:** `openfleet-sim` lives in `simulator/.venv/bin/`, not the backend venv.
+- **Logging in from a script:** `POST /api/v1/auth/login` needs the `X-OpenFleet-Client` header (CSRF defense), as do cookie-authenticated writes.
 - **Credentials in tests:** the `client` fixture signs every request (`RobotKeyAuth` in conftest).
   - Robot writes use the acting robot's key (`test-robot-key-<id>`). Everything else uses an OPERATOR user token (`ofu_test-operator-token`).
   - Both are issued inside the test transaction. `/auth/*` requests are left unsigned.
@@ -128,7 +132,16 @@ docker compose up -d postgres
 - **Known limitation:** `/rosout` lines logged right after a node starts can be missed before discovery completes.
 
 ## Recommended next task
-Multi-replica (sweeper lock + Redis fan-out) is done. Pick one:
-1. **Multi-replica e2e in CI:** a compose profile with 2 backend replicas behind nginx, plus a CI job that opens a WS on one and drives events through the other (the manual check, scripted).
-2. **Auth hardening:** login rate limiting, an OIDC provider as another way to create a session, and an audit view of triage actions (the actor is already on events).
-3. **Re-detection follow-ups:** store heartbeats per run so replay liveness matches live exactly; a `redetect` step in the CI e2e job (`--fail-on-missed` on the lidar_regression run).
+**Agreed with the owner (2026-11-06): do this batch of 7, one feature at a time.** For each one: build, test, verify on the live compose stack, update the docs (DECISIONS / ARCHITECTURE / FLOW / HANDOFF), then move on. Don't commit unless the owner asks; offer a commit point between features.
+1. ~~**CI: re-detection gate.**~~ Done: `e2e-regression-check` runs `openfleet redetect <lidar_regression run> --fail-on-missed --json` and asserts `caught >= 1 and missed == 0`, then checks that the gate exits 1 with `--set topic_degraded_ratio=0.4` (7/15 Hz = 0.47 is no longer below the threshold).
+2. ~~**CI: multi-replica e2e.**~~ Done: compose profile `replicas` (backend-2 + nginx lb), `scripts/multi_replica_e2e.py`, CI job `e2e-multi-replica`. Verified live, including that it fails with Redis stopped.
+3. ~~**Triage audit view.**~~ Done (#026): `triage_actions` table + `GET /triage` + Audit page. Note: only resolves had the actor before; INVESTIGATING was unrecorded, hence a table rather than an events query.
+4. **Login rate limiting.** Throttle failed logins per username and per IP. Redis is now available; nginx `limit_req` is an option too.
+5. **Store heartbeats per run**, so re-detection liveness matches live (removes the #023 tradeoff).
+6. **Sliding sessions.** Extend a session's expiry while it's in use, up to an absolute maximum.
+7. **Data retention.** Delete or downsample old runs' telemetry after a configurable age, in the sweeper or as a CLI command.
+
+**Not in the batch: these need the owner's decisions first.**
+- OIDC: which provider; auto-create users or invite only?
+- Multi-tenancy: what a tenant is; shared database or isolated?
+- TimescaleDB, detection behind a queue, MCAP/object storage: new infrastructure, only worth it at real scale.

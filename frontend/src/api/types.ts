@@ -252,3 +252,20 @@ export interface RedetectResult {
   new: number;
   notes: string[];
 }
+
+/** One manual status change in the triage audit log (DECISIONS #026). */
+export interface TriageAction {
+  id: number;
+  incident_id: string;
+  incident_title: string;
+  robot_id: string;
+  actor: string | null; // null only on rows backfilled from before the audit log
+  from_status: IncidentStatus | null; // likewise
+  to_status: IncidentStatus;
+  at: string;
+}
+
+export interface TriagePage {
+  items: TriageAction[];
+  next_cursor: string | null;
+}

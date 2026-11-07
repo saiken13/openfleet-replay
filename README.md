@@ -63,13 +63,15 @@ The local stack seeds **public** demo credentials so it works with no setup: use
 
 Postgres is published on host port **5433** (not 5432), so it doesn't clash with a locally installed Postgres. Override it with `OPENFLEET_PG_HOST_PORT`. Redis (realtime fan-out between replicas) is on host port **6380** (`OPENFLEET_REDIS_HOST_PORT`).
 
+To run two backend replicas behind a round-robin nginx: `docker compose --profile replicas up -d --build --wait` (replicas on :8000 and :8001, load balancer on :8090), then `python scripts/multi_replica_e2e.py` to check that live updates reach every replica. CI runs the same check.
+
 ## Authentication
 
 There are two kinds of credentials:
 - **Robots** use a per-robot API key on their writes (register, heartbeat, runs, telemetry). A key only works for its own robot.
 - **People** sign in to the dashboard. Every read and live view needs a user. Roles:
   - **viewer:** reads everything.
-  - **operator:** can also triage incidents.
+  - **operator:** can also triage incidents. Every triage action is recorded with who did it, on the **Audit** page.
 - **CLI and CI** (`openfleet check`) use a user API token.
 
 Manage everything on the server:
@@ -128,7 +130,7 @@ Run c9b8e261-…  robot=ci-01  version=1.1.0
 
 This exact flow runs in this repo's CI (`e2e-regression-check`). The healthy run must pass and the regression must fail.
 
-To check a rule or threshold change against recorded failures instead, use `openfleet redetect RUN --fail-on-missed [--set NAME=VALUE ...]`: it exits 1 if a failure recorded in that run would no longer be detected.
+To check a rule or threshold change against recorded failures instead, use `openfleet redetect RUN --fail-on-missed [--set NAME=VALUE ...]`: it exits 1 if a failure recorded in that run would no longer be detected. CI runs this as a gate on the regression run, and also checks that the gate fails when a looser threshold stops catching the LiDAR drop.
 
 > Replay never re-runs robot software: a recording always gives the same result. To regression-test a new build, produce a **new run** with it (simulator or ROS 2 sim in CI), then `check` it against a baseline. See [ARCHITECTURE §7](docs/ARCHITECTURE.md).
 

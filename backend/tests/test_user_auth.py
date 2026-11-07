@@ -91,7 +91,7 @@ def test_every_api_route_requires_robot_or_user_auth() -> None:
             calls = _calls(route.dependant)
             assert authenticated_robot in calls or current_user in calls, (method, path)
             checked += 1
-    assert checked == 24  # update when adding endpoints (and give them auth)
+    assert checked == 25  # update when adding endpoints (and give them auth)
 
 
 @pytest.mark.parametrize(
@@ -102,6 +102,7 @@ def test_every_api_route_requires_robot_or_user_auth() -> None:
         "/api/v1/runs",
         f"/api/v1/runs/{uuid.uuid4()}/stream",
         "/api/v1/incidents",
+        "/api/v1/triage",
         "/api/v1/auth/me",
     ],
 )

@@ -70,10 +70,11 @@ Design principle: **separate kinds of data by how they're written and read**, ra
 | Time series | `telemetry_samples`, `topic_samples` | Append, ~1/s per robot | Charts, compare, replay |
 | Discrete events | `events` | Append, sparse (only on *change*) | Timeline, replay, logs |
 | Lifecycle entities | `runs`, `incidents` | Create + status transitions | Lists, detail pages |
+| Audit | `triage_actions` | Append-only, one row per manual status change | Audit page, per-incident history |
 
 ### Tables
 
-Models: `backend/app/db/models.py`. Migrations: `0001` (robots, runs) and `0002` (everything else). Status-like columns are TEXT + CHECK (DECISIONS #015). Two columns were added beyond the original plan:
+Models: `backend/app/db/models.py`. Migrations: `0001` (robots, runs), `0002` (telemetry, events, incidents), `0003` (robot API keys), `0004` (users, tokens), `0005` (triage actions). Status-like columns are TEXT + CHECK (DECISIONS #015). Two columns were added beyond the original plan:
 - `topic_samples.status`: classified at ingest, so summaries and replay don't re-classify.
 - `incidents.last_detected_at`: drives the auto-resolve hysteresis.
 
@@ -112,6 +113,11 @@ Models: `backend/app/db/models.py`. Migrations: `0001` (robots, runs) and `0002`
 **incidents**
 - `id UUID PK`, `robot_id`, `run_id NULL`, `rule`, `dedup_key` (e.g. `topic_rate:/scan`), `severity` (INFO/WARNING/CRITICAL), `status` (OPEN/INVESTIGATING/RESOLVED), `title`, `description`, `software_version`, `evidence JSONB` (the rule's snapshot when it fired), `started_at`, `resolved_at`, `created_at`, `updated_at`
 - **Dedup:** `UNIQUE (robot_id, dedup_key) WHERE status <> 'RESOLVED'` (a partial unique index). It allows at most one *unresolved* incident per robot per failure, and the database enforces this even under concurrent writers.
+
+**triage_actions** (migration `0005`, DECISIONS #026)
+- `id BIGSERIAL` (also the paging order), `incident_id`, `robot_id`, `actor` (username), `from_status`, `to_status`, `at` (server time)
+- One row per manual status change, written in the same transaction. NULL `actor`/`from_status` only on rows backfilled from older `incident_resolved` events.
+- Kept apart from `events` so telemetry retention never removes who triaged what.
 
 ### Deliberately *not* tables
 - **Heartbeats**: they update `robots.last_seen_at` and are not stored. Their history is noise, and anything meaningful about them (going OFFLINE, a version change) becomes an event.
@@ -171,7 +177,7 @@ class Finding:
   - an existing key at higher severity → escalate the same incident (no new incident)
   - a key that is no longer reported for `INCIDENT_RESOLVE_AFTER_S` → auto-resolve, **only while the robot is live** (hysteresis, so a flapping topic doesn't open and close incidents every second; #019)
   - the robot reports its run ended → that run's data incidents resolve with reason "run ended" (#017)
-  - manual triage: OPEN → INVESTIGATING → RESOLVED via `PATCH /incidents/{id}`. RESOLVED is final, so a persisting condition opens a new incident.
+  - manual triage: OPEN → INVESTIGATING → RESOLVED via `PATCH /incidents/{id}`. RESOLVED is final, so a persisting condition opens a new incident. Each change is recorded with its operator in `triage_actions` (#026), listed by `GET /triage`.
 - **Topic health** is a pure function: `classify(expected_hz, actual_hz, last_msg_age_s, thresholds) → HEALTHY | DEGRADED | FAILED`.
 - Robot status is derived as: OFFLINE if not live; ERROR if a CRITICAL incident is open; DEGRADED if a WARNING incident is open; otherwise ONLINE.
 
@@ -233,7 +239,7 @@ These are expected to break first as the fleet grows. None of them is a problem 
 
 | Limit | Why | Evolution path |
 |---|---|---|
-| Every replica receives every realtime message | Redis fan-out (#025) uses one channel; fine for tens of replicas | Per-channel Redis subscriptions driven by local subscriber counts. (Multi-replica works today: the sweeper takes an advisory lock, #024, and needs a direct or session-pooled DB connection, not transaction-pooling PgBouncer.) |
+| Every replica receives every realtime message | Redis fan-out (#025) uses one channel; fine for tens of replicas | Per-channel Redis subscriptions driven by local subscriber counts. (Multi-replica works today: the sweeper takes an advisory lock, #024, and needs a direct or session-pooled DB connection, not transaction-pooling PgBouncer. Compose profile `replicas` + `scripts/multi_replica_e2e.py` exercise it in CI.) |
 | Detection on the request path | Ingest latency includes rule evaluation | Move detection behind a queue (NATS/Kafka) and a worker pool; ingest just appends |
 | Time-series rows in plain Postgres | Write volume and table size grow linearly with robots × rate | Batch inserts → time partitioning / TimescaleDB → retention and downsampling policies |
 | `robots` row updated on every batch | Hot-row updates | Update `last_seen_at` at most every N seconds, or move liveness to Redis |

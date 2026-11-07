@@ -139,5 +139,35 @@ jobs:
             --baseline "$(jq -r '.[0].run_id' base.json)"
           code=$?
           test "$code" -eq 1 || { echo "expected exit 1, got $code"; exit 1; }
+      # Re-detection gate (DECISIONS #023): today's rules must still catch every incident the
+      # regression run recorded. Asserting caught >= 1 keeps a run that recorded nothing from
+      # passing vacuously.
+      - name: Current rules still detect the recorded incidents
+        run: |
+          openfleet redetect "$(jq -r '.[0].run_id' cand.json)" --fail-on-missed --json > redetect.json
+          jq -e '.caught >= 1 and .missed == 0' redetect.json
+      - name: Re-detection gate fails when rules stop catching it (expects exit code 1)
+        run: |
+          set +e
+          openfleet redetect "$(jq -r '.[0].run_id' cand.json)" --fail-on-missed \
+            --set topic_degraded_ratio=0.4
+          code=$?
+          test "$code" -eq 1 || { echo "expected exit 1, got $code"; exit 1; }
       - if: failure()
         run: docker compose logs backend
+
+  # Two backend replicas behind a round-robin nginx (compose profile `replicas`): realtime
+  # events must reach WebSockets on every replica, and survive a Redis pub/sub drop.
+  e2e-multi-replica:
+    runs-on: ubuntu-latest
+    needs: [backend]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: docker compose --profile replicas up -d --build --wait postgres redis backend backend-2 lb
+      - run: pip install -e backend
+      - run: python scripts/multi_replica_e2e.py
+      - if: failure()
+        run: docker compose --profile replicas logs backend backend-2 lb
