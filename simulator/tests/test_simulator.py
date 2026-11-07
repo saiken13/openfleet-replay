@@ -121,6 +121,22 @@ async def test_run_scenario_drives_the_full_lifecycle() -> None:
     assert {r["robot_id"] for r in runs} == {"amr-01", "amr-02"}
 
 
+async def test_stalled_robot_heartbeats_in_robot_time_instead_of_sending_telemetry() -> None:
+    fake = FakeApi()
+    api = FleetApi("http://api", transport=httpx.MockTransport(fake), backoff_s=0)
+    sc = load_scenario(SCENARIOS / "telemetry_stall.yaml")  # stalled for 20..44 s of 60
+
+    await run_scenario(api, sc, fast=True)
+
+    telemetry = [b for m, p, b in fake.calls if p.endswith("/telemetry")]
+    beats = [b for m, p, b in fake.calls if p.endswith("/heartbeat")]
+    assert len(telemetry) == 35 and len(beats) == 25
+    ts = [datetime.fromisoformat(b["ts"]) for b in beats]
+    run_start = datetime.fromisoformat(telemetry[0]["ts"])
+    assert [(t - run_start).total_seconds() for t in ts] == [float(s) for s in range(20, 45)]
+    assert {b["software_version"] for b in beats} == {sc.software_version}
+
+
 async def test_client_retries_5xx_but_not_4xx() -> None:
     fake = FakeApi(fail_first=2)
     api = FleetApi("http://api", transport=httpx.MockTransport(fake), backoff_s=0)

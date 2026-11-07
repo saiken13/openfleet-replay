@@ -54,7 +54,7 @@ The backend stores those summaries. It decides whether something is unhealthy an
 | **Incident reconciler** (in `services/incident_service.py`) | Compares the current findings with open incidents and decides to open, escalate, or resolve. This is the stateful half of detection. | — |
 | **Sweeper** (`backend/app/workers/`) | Runs every `sweep_interval_s`. It catches problems that only show up as *missing* data: missing heartbeats, stale topics, abandoned runs. | Run a tick on two replicas at once: each tick takes a Postgres advisory lock (DECISIONS #024). |
 | **Realtime hub** (`backend/app/realtime/`) | Pub/sub: local delivery, plus Redis fan-out to other replicas when `REDIS_URL` is set (DECISIONS #025). Services publish *after commit*, and WebSocket connections subscribe. | Be the source of truth. If the browser reconnects, it reloads data over REST. |
-| **Replay** (`backend/app/replay/`) | Builds a run's ordered, merged event stream (read-only). Later it will also re-run detection rules over a recorded run. | Hold server-side playback state. Pacing happens in the client. |
+| **Replay** (`services/analysis_service.py` for the stream, `detection/replay.py` for re-detection) | Builds a run's ordered, merged event stream (read-only), and re-runs the current detection rules over a recorded run (DECISIONS #023, #028). | Hold server-side playback state. Pacing happens in the client. |
 | **PostgreSQL** | Source of truth for identity, current state, time series, events, and incidents. Enforces idempotency and dedup with constraints. | Store large binary recordings. Those go to object storage in Phase 2+. |
 | **Frontend** (`frontend/`) | React + TS + Vite SPA. A single reducer turns events into dashboard state, and both **live** (WS) and **replay** (stream + client clock) feed that same reducer. | Compute health or incident logic itself. |
 | **CLI** (`backend/openfleet_cli/`, installed as `openfleet`) | `openfleet check <run> --config regression.yaml` returns a non-zero exit code when a check fails. A thin HTTP client. | Re-implement detection logic. |
@@ -71,10 +71,11 @@ Design principle: **separate kinds of data by how they're written and read**, ra
 | Discrete events | `events` | Append, sparse (only on *change*) | Timeline, replay, logs |
 | Lifecycle entities | `runs`, `incidents` | Create + status transitions | Lists, detail pages |
 | Audit | `triage_actions` | Append-only, one row per manual status change | Audit page, per-incident history |
+| Contact | `heartbeat_spans` | One row per contiguous run of heartbeats during a run, extended in place | Re-detection replay |
 
 ### Tables
 
-Models: `backend/app/db/models.py`. Migrations: `0001` (robots, runs), `0002` (telemetry, events, incidents), `0003` (robot API keys), `0004` (users, tokens), `0005` (triage actions). Status-like columns are TEXT + CHECK (DECISIONS #015). Two columns were added beyond the original plan:
+Models: `backend/app/db/models.py`. Migrations: `0001` (robots, runs), `0002` (telemetry, events, incidents), `0003` (robot API keys), `0004` (users, tokens), `0005` (triage actions), `0006` (heartbeat spans). Status-like columns are TEXT + CHECK (DECISIONS #015). Two columns were added beyond the original plan:
 - `topic_samples.status`: classified at ingest, so summaries and replay don't re-classify.
 - `incidents.last_detected_at`: drives the auto-resolve hysteresis.
 
@@ -119,8 +120,13 @@ Models: `backend/app/db/models.py`. Migrations: `0001` (robots, runs), `0002` (t
 - One row per manual status change, written in the same transaction. NULL `actor`/`from_status` only on rows backfilled from older `incident_resolved` events.
 - Kept apart from `events` so telemetry retention never removes who triaged what.
 
+**heartbeat_spans** (migration `0006`, DECISIONS #028)
+- `id BIGSERIAL`, `run_id`, `robot_id`, `started_at`, `ended_at` (robot time, or server time for a heartbeat without `ts`), `heartbeats` (count)
+- A heartbeat during a run extends the run's latest span if it's within `HEARTBEAT_SPAN_GAP_S`, else starts one. Index `(run_id, ended_at)`.
+- Only re-detection reads it: contact without batches is a live robot with stale data, not silence.
+
 ### Deliberately *not* tables
-- **Heartbeats**: they update `robots.last_seen_at` and are not stored. Their history is noise, and anything meaningful about them (going OFFLINE, a version change) becomes an event.
+- **Individual heartbeats**: they update `robots.last_seen_at`. Anything meaningful about them (going OFFLINE, a version change) becomes an event. During a run they're kept only as merged contact spans (`heartbeat_spans`, #028), which re-detection needs.
 - **Software versions**: version history comes from `runs` (`SELECT DISTINCT software_version … ORDER BY started_at`) plus `software_version_changed` events. We'll add a table when we have deployments or rollouts.
 - **Incident timelines**: computed, not stored (see §5).
 
@@ -209,6 +215,7 @@ Replaying a *recording* doesn't run new robot software, so a recorded run always
 | `DATABASE_URL` | compose DB on `localhost:5433` | asyncpg URL |
 | `REDIS_URL` | unset (compose: `redis://redis:6379/0`) | realtime fan-out between replicas (#025); unset = in-process hub only |
 | `HEARTBEAT_TIMEOUT_S` | 10 | silence (server time) before a robot is not live |
+| `HEARTBEAT_SPAN_GAP_S` | 5 | heartbeats during a run at most this far apart merge into one `heartbeat_spans` row (#028) |
 | `SWEEP_INTERVAL_S` / `SWEEPER_ENABLED` | 2 / true | sweeper cadence |
 | `RUN_ABANDON_AFTER_S` | 60 | silence before a RUNNING run is ABORTED |
 | `INCIDENT_RESOLVE_AFTER_S` | 10 | auto-resolve hysteresis |

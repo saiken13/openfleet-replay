@@ -1,0 +1,24 @@
+name: telemetry_stall
+description: >
+  The LiDAR degrades, then the robot's telemetry stalls for 25 s while it keeps
+  heartbeating (its ROS graph hung, its uplink did not). Live, that is stale data, not an
+  offline robot; `openfleet redetect` must agree (DECISIONS #028), so it finds no new
+  heartbeat_missing incident.
+seed: 11
+duration_s: 60
+fleet:
+  count: 1
+  id_prefix: ci
+topics:
+  /scan: 15
+  /odom: 50
+nodes: [lidar_driver, nav2_controller]
+failures:
+  - kind: topic_rate
+    topic: /scan
+    hz: 7
+    at_s: 5
+    duration_s: 10
+  - kind: telemetry_stall
+    at_s: 20
+    duration_s: 25

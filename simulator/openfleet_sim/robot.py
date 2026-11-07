@@ -15,6 +15,7 @@ from openfleet_sim.scenario import (
     NodeStateFailure,
     OfflineFailure,
     Scenario,
+    TelemetryStallFailure,
     TopicRateFailure,
 )
 
@@ -42,10 +43,16 @@ class SimRobot:
     def is_offline(self, t: float) -> bool:
         return any(isinstance(f, OfflineFailure) for f in self._active(t))
 
+    def is_stalled(self, t: float) -> bool:
+        """Heartbeating, but sending no telemetry."""
+        return not self.is_offline(t) and any(
+            isinstance(f, TelemetryStallFailure) for f in self._active(t)
+        )
+
     def step(self, t: float, ts: datetime) -> dict[str, Any] | None:
         """Advance to scenario time t (seconds since run start); `ts` is the robot-clock
         timestamp to stamp the batch with. Returns the telemetry batch, or None while the
-        robot is offline (it sends nothing)."""
+        robot is offline (it sends nothing) or stalled (it only heartbeats)."""
         sc = self.scenario
         active = self._active(t)
 
@@ -54,7 +61,7 @@ class SimRobot:
         )
         self.battery = max(0.0, self.battery - drain * sc.tick_s)
 
-        if self.is_offline(t):
+        if self.is_offline(t) or self.is_stalled(t):
             return None
 
         r = self.rng

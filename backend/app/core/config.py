@@ -35,6 +35,10 @@ class Settings(BaseSettings):
 
     # Liveness (server time, DECISIONS #010)
     heartbeat_timeout_s: float = Field(10.0, gt=0)
+    # Heartbeats during a run are stored as spans (DECISIONS #028); ones at most this far
+    # apart merge into one row. Replays with a heartbeat timeout below this can't see gaps
+    # shorter than it.
+    heartbeat_span_gap_s: float = Field(5.0, gt=0)
     sweep_interval_s: float = Field(2.0, gt=0)
     sweeper_enabled: bool = True
     # Realtime fan-out between replicas (DECISIONS #025). Unset: in-process only, which is

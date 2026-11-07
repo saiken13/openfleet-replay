@@ -174,6 +174,7 @@ python3.12 -m venv .venv && .venv/bin/pip install -e ".[dev]"
 export OPENFLEET_ROBOT_KEYS_FILE=../examples/demo-robot-keys.json
 .venv/bin/openfleet-sim -s scenarios/demo.yaml            # real time
 .venv/bin/openfleet-sim -s scenarios/demo.yaml --speed 4  # compressed
+# Other scenarios: healthy, lidar_regression, telemetry_stall (data stops, heartbeats continue)
 .venv/bin/pytest
 
 # Frontend (Node 22+) — from the repo root (or `cd frontend` and use the same commands)

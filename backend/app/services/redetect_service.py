@@ -13,6 +13,7 @@ from app.db.models import Incident, Run
 from app.detection.model import DetectionConfig
 from app.detection.replay import (
     RecordedBatch,
+    RecordedContact,
     RecordedNodeChange,
     RecordedTopic,
     ReplayIncident,
@@ -21,6 +22,7 @@ from app.detection.replay import (
 from app.domain.enums import NodeState, RunStatus, Severity
 from app.domain.errors import InvalidRequestError, NotFoundError
 from app.repositories.analysis_repository import AnalysisRepository
+from app.repositories.heartbeat_repository import HeartbeatRepository
 from app.repositories.incident_repository import IncidentRepository
 from app.repositories.run_repository import RunRepository
 from app.schemas.incident import IncidentRead
@@ -36,6 +38,7 @@ class RedetectService:
         self.runs = RunRepository(session)
         self.analysis = AnalysisRepository(session)
         self.incidents = IncidentRepository(session)
+        self.heartbeats = HeartbeatRepository(session)
 
     async def redetect(self, run_id: uuid.UUID, req: RedetectRequest) -> RedetectResult:
         run = await self.runs.get(run_id)
@@ -61,6 +64,10 @@ class RedetectService:
             batches=batches,
             node_changes=changes,
             ended_at=run.ended_at,
+            contacts=[
+                RecordedContact(start=s.started_at, end=s.ended_at)
+                for s in await self.heartbeats.for_run(run_id)
+            ],
             cfg=cfg,
             resolve_after_s=resolve_after_s,
         )

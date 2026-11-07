@@ -81,8 +81,12 @@ class FleetApi:
             "PUT", f"/api/v1/robots/{robot_id}", robot_id, {"name": name, "model": model}
         )
 
-    async def heartbeat(self, robot_id: str, software_version: str | None) -> None:
-        body = {"software_version": software_version} if software_version else {}
+    async def heartbeat(
+        self, robot_id: str, software_version: str | None, ts: str | None = None
+    ) -> None:
+        body: dict[str, Any] = {"software_version": software_version} if software_version else {}
+        if ts:
+            body["ts"] = ts  # robot clock: re-detection lines it up with the batches
         await self._request("POST", f"/api/v1/robots/{robot_id}/heartbeat", robot_id, body)
 
     async def start_run(

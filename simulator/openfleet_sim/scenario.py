@@ -57,6 +57,12 @@ class OfflineFailure(FailureBase):
     kind: Literal["offline"]  # the robot stops sending anything
 
 
+class TelemetryStallFailure(FailureBase):
+    # No telemetry batches, but heartbeats continue: the robot's uplink is alive while its
+    # data pipeline (e.g. the ROS graph) is not. Re-detection must not call this "silent".
+    kind: Literal["telemetry_stall"]
+
+
 class LogFailure(FailureBase):
     kind: Literal["log"]  # a single log line at at_s
     source: str = "system"
@@ -70,6 +76,7 @@ Failure = Annotated[
     | MemoryFailure
     | BatteryDrainFailure
     | OfflineFailure
+    | TelemetryStallFailure
     | LogFailure,
     Field(discriminator="kind"),
 ]

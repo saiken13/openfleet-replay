@@ -153,6 +153,14 @@ jobs:
             --set topic_degraded_ratio=0.4
           code=$?
           test "$code" -eq 1 || { echo "expected exit 1, got $code"; exit 1; }
+      # Heartbeat spans (DECISIONS #028): telemetry stalls for 25 s while the robot keeps
+      # heartbeating. The replay must see a live robot with stale data (the degraded /scan
+      # is caught), not a silent one (no new heartbeat_missing).
+      - name: Telemetry stall is not replayed as silence
+        run: |
+          openfleet-sim -s simulator/scenarios/telemetry_stall.yaml --fast -o stall.json --keys examples/demo-robot-keys.json
+          openfleet redetect "$(jq -r '.[0].run_id' stall.json)" --json > stall-redetect.json
+          jq -e '.caught >= 1 and .missed == 0 and .new == 0' stall-redetect.json
       - if: failure()
         run: docker compose logs backend
 

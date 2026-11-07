@@ -29,7 +29,9 @@ def b(s: float, scan_hz: float = 15.0, cpu: float | None = 30.0, **kw) -> Record
     return RecordedBatch(ts=at(s), cpu_pct=cpu, mem_pct=40.0, battery_pct=80.0, topics=topics, **kw)
 
 
-def replay(batches, *, changes=(), ended_at=None, cfg=CFG, resolve_after=RESOLVE_AFTER):
+def replay(
+    batches, *, changes=(), ended_at=None, cfg=CFG, resolve_after=RESOLVE_AFTER, contacts=()
+):
     return replay_run(
         robot_id="robot-01",
         run_id=RUN,
@@ -37,6 +39,7 @@ def replay(batches, *, changes=(), ended_at=None, cfg=CFG, resolve_after=RESOLVE
         batches=batches,
         node_changes=changes,
         ended_at=ended_at,
+        contacts=contacts,
         cfg=cfg,
         resolve_after_s=resolve_after,
     )

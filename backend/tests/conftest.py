@@ -293,6 +293,7 @@ async def purge_robots(session: AsyncSession, prefix: str) -> None:
 
     from app.db.models import (
         Event,
+        HeartbeatSpan,
         Incident,
         NodeStateRow,
         Robot,
@@ -311,6 +312,7 @@ async def purge_robots(session: AsyncSession, prefix: str) -> None:
     await session.execute(delete(User).where(User.username.startswith(prefix)))
     for model in (
         TriageAction,
+        HeartbeatSpan,
         Incident,
         Event,
         TopicSample,

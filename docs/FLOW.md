@@ -151,6 +151,8 @@ Robot
 → backend/app/api/v1/robots.py :: heartbeat()
 → backend/app/services/liveness_service.py :: LivenessService.heartbeat()
     ├─ lock robot; last_seen_at = server now   (never robot ts — DECISIONS #010)
+    ├─ in a run? HeartbeatRepository.record()    extend the latest heartbeat_spans row if ts (or now)
+    │                                            is within HEARTBEAT_SPAN_GAP_S, else insert (#028)
     ├─ record_software_version()                software_version_changed event if it changed
     ├─ Detector.evaluate()                       e.g. OFFLINE → ONLINE (robot_status_changed)
     └─ commit()
@@ -217,8 +219,12 @@ POST /api/v1/runs/{id}/redetect  {optional threshold overrides}      VIEWER, rea
 → backend/app/services/redetect_service.py :: RedetectService.redetect()
    size check (OPENFLEET_REDETECT_MAX_SAMPLES) → effective DetectionConfig (settings + overrides)
    analysis_repository.py: samples(), topic_samples() (grouped by seq), node_events()
+   heartbeat_repository.py: for_run() → RecordedContact spans (#028)
 → backend/app/detection/replay.py :: replay_run()                    pure
-   per batch (ts order): gap > timeout? → silent snapshot → heartbeat_missing
+   between batches (and after the last, to run end): split the gap by heartbeat spans
+      uncovered > timeout → silent snapshot → heartbeat_missing
+      covered → live snapshot, data going stale; evaluated at its change points only
+   per batch (ts order):
                          apply node changes ≤ ts, carry metrics, classify_topic() again
                          → RobotSnapshot → rules.evaluate_all() → _Reconciler.step()
    run end → _Reconciler.end_run()

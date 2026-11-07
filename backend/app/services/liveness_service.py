@@ -6,6 +6,7 @@ from app.core.config import Settings
 from app.domain.enums import RunStatus
 from app.domain.errors import NotFoundError
 from app.realtime.hub import Hub
+from app.repositories.heartbeat_repository import HeartbeatRepository
 from app.repositories.robot_repository import RobotRepository
 from app.repositories.run_repository import RunRepository
 from app.services.base import Service
@@ -30,6 +31,14 @@ class LivenessService(Service):
         if robot is None:
             raise NotFoundError(f"robot {robot_id!r} not found")
         await record_contact(self, robot, now)  # server time, never robot ts (#010)
+        if robot.current_run_id is not None:
+            # For re-detection (#028), in robot time like the batches it's compared with.
+            await HeartbeatRepository(self.session).record(
+                robot.current_run_id,
+                robot.id,
+                ts or now,
+                timedelta(seconds=self.settings.heartbeat_span_gap_s),
+            )
         await record_software_version(
             self, robot, software_version, ts or now, robot.current_run_id
         )

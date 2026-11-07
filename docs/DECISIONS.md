@@ -304,7 +304,7 @@ Both showed up in the first end-to-end demo.
 - Replaying through the ingest path into a throwaway robot: real writes, real events, and cleanup.
 - Running in a worker with progress reporting: not needed below the size limit (a 1-hour run is a few hundred ms).
 **Tradeoffs:**
-- Heartbeats aren't stored, so a robot that kept heartbeating but stopped sending telemetry mid-run shows as `heartbeat_missing` in the replay, where live it only saw stale data.
+- Heartbeats aren't stored, so a robot that kept heartbeating but stopped sending telemetry mid-run shows as `heartbeat_missing` in the replay, where live it only saw stale data. *(Resolved by #028: heartbeats during a run are stored as spans.)*
 - A node's state persists until its next change event; a node that stopped being reported keeps its last state (live, it goes stale after the heartbeat timeout).
 - Recorded incident times are server time and replay times are robot time; the offsets are comparable only when the robot clock was roughly right (BUG-003).
 - Rule *code* changes are picked up automatically (it's the deployed rule set); there is no way to replay with an older rule set.
@@ -402,3 +402,27 @@ Both showed up in the first end-to-end demo.
 - `FORWARDED_ALLOW_IPS="*"` in compose means a client calling the published backend port `:8000` directly can choose its own IP and dodge the per-IP limit (not the per-username one). A real deployment shouldn't expose the backend and should set it to the proxy's address.
 - With the memory fallback and N replicas behind round-robin, the effective limit during a Redis outage is up to N times higher.
 **Date:** 2026-11-06
+
+## 028 — Heartbeats stored per run as merged spans, so re-detection can tell a stall from silence
+**Status:** Accepted (2026-11-07). Removes #023's first tradeoff. Refines ARCHITECTURE §3 "Heartbeats are not stored".
+**Decision:**
+- A heartbeat received while the robot has a current run is recorded in `heartbeat_spans` (`run_id`, `robot_id`, `started_at`, `ended_at`, `heartbeats`; migration `0006`). If it falls within `HEARTBEAT_SPAN_GAP_S` (5 s) of the run's latest span, it extends that span; otherwise it starts a new one. A robot heartbeating steadily through a run costs one row.
+- Times are the heartbeat's `ts` (robot clock), falling back to server time when it has none, because the replay works in robot time like the batches it lines them up with. Liveness itself still uses server time only (#010).
+- Heartbeats outside a run aren't stored: re-detection is per run, and `heartbeat_missing` only fires during one (#019).
+- `replay_run(contacts=...)` treats batches and spans together as contact. A stretch longer than the timeout with neither is silence, as before, and opens `heartbeat_missing` at the last contact plus the timeout. Where only heartbeats arrived, the robot is live and its data goes stale. Live detection re-evaluates on every heartbeat, so the replay evaluates at every instant that gives the same result: the last fresh instant and the first stale one for each topic, each pending hysteresis deadline, and the end of the contact.
+- The simulator gained a `telemetry_stall` failure (batches stop, heartbeats with `ts` continue) and a `telemetry_stall` scenario. CI runs it in `--fast` mode and asserts that `openfleet redetect` finds the degraded `/scan` and **no new** incidents. Without spans the stall comes out as a `replay_only` `heartbeat_missing`.
+**Why:**
+- A hung data pipeline under a live uplink is a real failure mode (the ROS graph stops, the agent doesn't). Live detection treats it as stale data, and the replay called it an outage. That made re-detection disagree with live on exactly the runs worth investigating.
+- Spans instead of one row per heartbeat: the replay only needs to know when contact existed, and merging keeps that at almost no storage (the 1 Hz batches already dominate).
+- Evaluating at change points instead of a fixed cadence: exact, and the cost doesn't grow with how long a stall lasts.
+**Alternatives considered:**
+- One row per heartbeat: simplest, but it duplicates the batch row rate for robots that heartbeat during runs, for no extra information.
+- Storing heartbeats in `events`: events are for changes; this is continuous contact, and the payload would be read by range.
+- Replaying with a 1 s tick through stalls: approximates live heartbeats, but it's inexact and grows with stall length.
+**Tradeoffs:**
+- A replay with a `heartbeat_timeout_s` override below `HEARTBEAT_SPAN_GAP_S` can't see heartbeat gaps shorter than the merge gap; they're inside one span.
+- Heartbeats cost one indexed SELECT and an UPDATE (or INSERT) while the robot row is already locked.
+- Clients that heartbeat without `ts` get server-time spans next to robot-time batches; they line up only when the robot clock is roughly right, as with BUG-003.
+- Silence before the first batch isn't replayed, as before.
+- Neither of the bundled clients heartbeats during a run except in the simulator's `telemetry_stall`; the benefit is for clients that do (e.g. a separate uplink agent).
+**Date:** 2026-11-07

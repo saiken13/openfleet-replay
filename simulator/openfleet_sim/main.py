@@ -60,7 +60,12 @@ async def run_scenario(
             ts = t0 + timedelta(seconds=t) if fast else datetime.now(UTC)
             batches = [(r, r.step(t, ts)) for r in robots]
             await asyncio.gather(
-                *(api.telemetry(runs[r.robot_id], b) for r, b in batches if b is not None)
+                *(api.telemetry(runs[r.robot_id], b) for r, b in batches if b is not None),
+                *(
+                    api.heartbeat(r.robot_id, version, ts.isoformat())
+                    for r in robots
+                    if r.is_stalled(t)
+                ),
             )
             if not fast:
                 target = start_wall + (i + 1) * sc.tick_s / speed

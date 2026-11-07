@@ -291,3 +291,20 @@ class TriageAction(Base):
     from_status: Mapped[str | None] = mapped_column(Text)  # NULL only on backfilled rows
     to_status: Mapped[str] = mapped_column(Text)
     at: Mapped[datetime] = mapped_column(TZ)  # server time
+
+
+class HeartbeatSpan(Base):
+    """Heartbeats received during a run, merged into contiguous spans (DECISIONS #028).
+    Consecutive heartbeats at most `HEARTBEAT_SPAN_GAP_S` apart extend one row, so a
+    robot heartbeating steadily through a run costs one row. Re-detection replay uses them
+    to tell "silent" from "alive but not sending telemetry"."""
+
+    __tablename__ = "heartbeat_spans"
+    __table_args__ = (Index("ix_heartbeat_spans_run_id_ended_at", "run_id", "ended_at"),)
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    run_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("runs.id"))
+    robot_id: Mapped[str] = mapped_column(Text, ForeignKey("robots.id"))
+    started_at: Mapped[datetime] = mapped_column(TZ)  # robot time (server time if no ts)
+    ended_at: Mapped[datetime] = mapped_column(TZ)
+    heartbeats: Mapped[int] = mapped_column(Integer)
