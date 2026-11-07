@@ -17,6 +17,12 @@ x-backend: &backend
     OPENFLEET_ROBOT_KEYS_FILE: /etc/openfleet/demo-robot-keys.json
     OPENFLEET_USERS_FILE: /etc/openfleet/demo-users.json
     OPENFLEET_LOGIN_HINT: "Demo: operator / operator-demo (can triage) or viewer / viewer-demo"
+    # uvicorn takes the client IP (for login throttling, DECISIONS #027) from X-Forwarded-For
+    # sent by these addresses. "*" because the nginx containers' IPs aren't fixed; the proxies
+    # overwrite the header, so it can't be spoofed through them. It CAN be spoofed by calling
+    # the published :8000 directly, which a real deployment shouldn't expose: there, set this
+    # to the proxy's address.
+    FORWARDED_ALLOW_IPS: "*"
   volumes:
     - *demo-keys
     - *demo-users

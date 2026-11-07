@@ -40,10 +40,15 @@ Seed: app/main.py :: seed_robot_keys() at startup if OPENFLEET_ROBOT_KEYS_FILE �
 ```
 Dashboard: POST /api/v1/auth/login {username, password} + X-OpenFleet-Client header
 → backend/app/api/v1/auth.py :: login()
+→ LoginThrottle.attempt(username, client IP)  backend/app/services/login_throttle.py (#027)
+    ├─ INCR openfleet:login:user:{window}:{name} and …:ip:{window}:{ip}  (Redis; memory fallback)
+    └─ either over its limit → 429 + Retry-After; the password is not checked
 → UserService.login()  backend/app/services/user_service.py
     ├─ UserRepository.by_username(lowercase)        unknown → verify against DUMMY_HASH (same timing)
     ├─ passwords.verify_password() in a thread      scrypt, constant-time compare
     └─ insert SESSION token (sha256), expires now + SESSION_TTL_S; COMMIT
+→ wrong credentials → 401 (the reserved slots stay used)
+→ LoginThrottle.succeeded(): clear the username counter, give back the IP slot
 → 200 UserRead + Set-Cookie openfleet_session (HttpOnly, SameSite=Strict, Path=/api)
 
 Any read: app/api/auth.py :: current_user()   (via require_viewer / require_operator)

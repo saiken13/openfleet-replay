@@ -16,7 +16,7 @@ from app.api.auth import (
     user_bearer,
     user_token_from,
 )
-from app.api.deps import NowDep, SessionDep, SettingsDep
+from app.api.deps import NowDep, SessionDep, SettingsDep, ThrottleDep
 from app.domain.enums import UserRole
 from app.services.user_service import UserService
 
@@ -47,7 +47,10 @@ async def auth_config(settings: SettingsDep) -> AuthConfig:
 @router.post(
     "/login",
     response_model=UserRead,
-    responses={401: {"description": "Wrong username or password"}},
+    responses={
+        401: {"description": "Wrong username or password"},
+        429: {"description": "Too many sign-in attempts; see the Retry-After header"},
+    },
     summary="Sign in; sets the HttpOnly session cookie",
 )
 async def login(
@@ -57,12 +60,24 @@ async def login(
     session: SessionDep,
     settings: SettingsDep,
     now: NowDep,
+    throttle: ThrottleDep,
 ) -> UserRead:
     require_client_header(request)  # no login CSRF from a cross-site form
+    # The client address is the proxy's unless uvicorn trusts its X-Forwarded-For
+    # (FORWARDED_ALLOW_IPS); the proxy must overwrite that header, not append to it.
+    ip = request.client.host if request.client else None
+    retry_after = await throttle.attempt(body.username, ip, now)
+    if retry_after is not None:
+        raise HTTPException(
+            status.HTTP_429_TOO_MANY_REQUESTS,
+            f"too many sign-in attempts; try again in {retry_after} s",
+            headers={"Retry-After": str(retry_after)},
+        )
     ttl = timedelta(seconds=settings.session_ttl_s)
     issued = await UserService(session).login(body.username, body.password, now, ttl)
     if issued is None:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "wrong username or password")
+    await throttle.succeeded(body.username, ip, now)
     response.set_cookie(
         SESSION_COOKIE,
         issued.token,

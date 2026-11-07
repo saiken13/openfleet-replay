@@ -17,6 +17,7 @@ from app.db.session import build_sessionmaker
 from app.realtime.bus import RedisBus
 from app.realtime.hub import Hub
 from app.services.api_key_service import ApiKeyService
+from app.services.login_throttle import LoginThrottle
 from app.services.user_service import UserService
 from app.workers.lock import AdvisoryLock
 from app.workers.sweeper import Sweeper
@@ -70,6 +71,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.engine = build_engine(settings)
         app.state.sessionmaker = build_sessionmaker(app.state.engine)
         app.state.hub = Hub()
+        app.state.login_throttle = LoginThrottle(settings, settings.redis_url)
         await seed_robot_keys(settings, app.state.sessionmaker)
         await seed_users(settings, app.state.sessionmaker)
         app.state.sweeper = Sweeper(
@@ -95,6 +97,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     await task
             if app.state.bus is not None:
                 await app.state.bus.stop()
+            await app.state.login_throttle.close()
             await app.state.engine.dispose()
 
     app = FastAPI(

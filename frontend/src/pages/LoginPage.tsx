@@ -21,7 +21,10 @@ export function LoginPage() {
     try {
       await login(username, password);
     } catch (err) {
-      setError(err instanceof ApiError && err.status === 401 ? "Wrong username or password." : String(err));
+      if (err instanceof ApiError && err.status === 401) setError("Wrong username or password.");
+      // Throttled (DECISIONS #027): the server says how long to wait.
+      else if (err instanceof ApiError && err.status === 429) setError(`Too many sign-in attempts: ${err.message.replace(/^.*?; /, "")}.`);
+      else setError(String(err));
     } finally {
       setBusy(false);
     }

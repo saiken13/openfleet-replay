@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import Settings
 from app.db.session import get_session
 from app.realtime.hub import Hub
+from app.services.login_throttle import LoginThrottle
 
 
 def get_now() -> datetime:
@@ -18,6 +19,10 @@ def get_hub(request: Request) -> Hub:
     return request.app.state.hub
 
 
+def get_login_throttle(request: Request) -> LoginThrottle:
+    return request.app.state.login_throttle
+
+
 def get_app_settings(request: Request) -> Settings:
     return request.app.state.settings
 
@@ -25,4 +30,5 @@ def get_app_settings(request: Request) -> Settings:
 SessionDep = Annotated[AsyncSession, Depends(get_session)]
 HubDep = Annotated[Hub, Depends(get_hub)]
 SettingsDep = Annotated[Settings, Depends(get_app_settings)]
+ThrottleDep = Annotated[LoginThrottle, Depends(get_login_throttle)]
 NowDep = Annotated[datetime, Depends(get_now)]

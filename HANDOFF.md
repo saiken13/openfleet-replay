@@ -7,6 +7,8 @@
 - **Latest commit:** see `git log -1`
 
 ## Current state
+**Login throttling done (2026-11-06, DECISIONS #027).** `app/services/login_throttle.py :: LoginThrottle` reserves a slot per username and per client IP before the password is checked. Over the limit (5 / 20 per 300 s), the response is 429 + `Retry-After`. Counters are kept in Redis (shared by replicas), falling back to memory. Success clears the username counter and gives back the IP slot. Both nginx configs now overwrite `X-Forwarded-For` with `$remote_addr`, and compose sets `FORWARDED_ALLOW_IPS: "*"` so uvicorn uses it. The login page shows the wait. Also fixed `alembic/env.py`: `fileConfig` was disabling every already-imported app logger when migrations ran in-process. Tests: `tests/test_login_throttle.py` (10, two of them against real Redis). Verified live through :8080: five 401s then a 429; a spoofed `X-Forwarded-For` was ignored (the key held the real client IP, not nginx's); both keys were in Redis; one warning was logged; the login page showed the message (headless-Chrome screenshot).
+
 **Triage audit log done (2026-11-06, DECISIONS #026).** Every manual incident status change writes a `triage_actions` row (actor, from → to, server time) in the same transaction (`app/repositories/triage_repository.py`, hooked in `IncidentService.update_status`). `GET /api/v1/triage` (viewer; filters actor/robot_id/incident_id, id cursor) feeds the dashboard's **Audit** page (`frontend/src/pages/TriagePage.tsx`); incident pages link to their own history. Migration `0005` backfills older manual resolves from `incident_resolved` events (actor/from may be NULL). Tests: `tests/test_triage_audit.py`. Verified live: demo operator INVESTIGATING → RESOLVED on a real incident, both rows on the page (screenshot via headless Chrome).
 
 **Realtime fan-out across replicas done (2026-11-06, DECISIONS #025).** With `OPENFLEET_REDIS_URL` set (compose sets it), `app/realtime/bus.py :: RedisBus` forwards hub messages over Redis pub/sub. Delivery is local-first, own echoes are skipped, and per-instance seq numbers plus a heartbeat detect loss. On a gap or a (re)subscribe the replica calls `Hub.resync()`, so its WebSockets close with 1012 and clients reload over REST (no frontend change).
@@ -56,17 +58,17 @@ CI jobs: backend, simulator, frontend, collector, ros2-collector-e2e, `e2e-regre
   - Modes: real time, `--fast`, and `--loop`.
 - **Frontend** (`frontend/`): fleet, robot (live), incidents, incident detail (charts, timeline, first signal, triage), runs, run replay, and compare.
 - **Tests:**
-  - Backend: 219 (incl. 4 triage-audit tests, 9 bus tests, 4 sweeper-lock tests, 15 pure replay-engine tests and 8 redetect API tests), against real Postgres, including concurrency races and mutation-checked guards. Auth tests: `tests/test_auth.py` (robots), `tests/test_user_auth.py` (users, with a route-coverage test), the WS auth in `tests/test_realtime.py`, and the CLI in `tests/test_cli.py`.
+  - Backend: 229 (incl. 10 login-throttle tests, 4 triage-audit tests, 9 bus tests, 4 sweeper-lock tests, 15 pure replay-engine tests and 8 redetect API tests), against real Postgres, including concurrency races and mutation-checked guards. Auth tests: `tests/test_auth.py` (robots), `tests/test_user_auth.py` (users, with a route-coverage test), the WS auth in `tests/test_realtime.py`, and the CLI in `tests/test_cli.py`.
   - Simulator: 13.
   - Collector: 24.
   - Frontend: 17 (reducer, ReplayClock, auth helpers, redetect overrides).
-- **Docs:** README, ARCHITECTURE, FLOW (real file:function paths), DECISIONS 001–026, BUGS 001–003, CONSTRAINTS.
+- **Docs:** README, ARCHITECTURE, FLOW (real file:function paths), DECISIONS 001–027, BUGS 001–003, CONSTRAINTS.
 
 ## Currently working
 Nothing in progress.
 
 ## Not built yet
-- **Auth follow-ups:** login rate limiting (do it at the proxy for now), SSO/OIDC, multi-tenancy, sliding sessions.
+- **Auth follow-ups:** SSO/OIDC, multi-tenancy, sliding sessions.
 - **rosbag2/MCAP storage:** object storage.
 - **Scaling work** (ARCHITECTURE §10): TimescaleDB, retention, detection behind a queue. (Sweeper lock #024 and Redis fan-out #025 are done.)
 
@@ -93,13 +95,14 @@ None open. Fixed bugs are recorded in docs/BUGS.md.
 - **Fast mode:** in `openfleet-sim --fast`, incidents don't auto-resolve *by hysteresis* within the run (it uses server time), but they still resolve when the run ends (#017), so a finished fast run leaves nothing open. To triage a live incident by hand, run `simulator/.venv/bin/openfleet-sim -s simulator/scenarios/lidar_regression.yaml --keys examples/demo-robot-keys.json` in real time (60 s).
 - **Simulator binary:** `openfleet-sim` lives in `simulator/.venv/bin/`, not the backend venv.
 - **Logging in from a script:** `POST /api/v1/auth/login` needs the `X-OpenFleet-Client` header (CSRF defense), as do cookie-authenticated writes.
+- **Login throttle (#027):** scripts that log in repeatedly with a wrong password get 429s for up to 5 min. To unlock the dev stack: `docker compose exec -T redis redis-cli --scan --pattern 'openfleet:login:*' | xargs docker compose exec -T redis redis-cli DEL` (or restart the backend if Redis isn't in use). Through :8080 the per-IP key is Docker Desktop's gateway (192.168.65.1), so every host browser shares one IP limit.
 - **Credentials in tests:** the `client` fixture signs every request (`RobotKeyAuth` in conftest).
   - Robot writes use the acting robot's key (`test-robot-key-<id>`). Everything else uses an OPERATOR user token (`ofu_test-operator-token`).
   - Both are issued inside the test transaction. `/auth/*` requests are left unsigned.
   - To test auth itself, pass `auth=None` plus explicit headers.
   - `passwords.SCRYPT_N` is lowered in conftest for speed.
   - WS tests need a really committed user (TestClient runs its own loop), so they use the `concurrency-ws-` prefix; `purge_robots()` also deletes users by that prefix.
-- **New endpoints:** `test_every_api_route_requires_robot_or_user_auth` fails until a route has `dependencies=[VIEWER]`, an `Operator`, or `RobotAuth`. Its route count (24) also needs updating.
+- **New endpoints:** `test_every_api_route_requires_robot_or_user_auth` fails until a route has `dependencies=[VIEWER]`, an `Operator`, or `RobotAuth`. Its route count (25) also needs updating.
 - **Demo users:** `examples/demo-users.json` (operator/operator-demo, viewer/viewer-demo, and the viewer token `ofu_demo_viewer_public-not-secret`, which CI and `collector/ros_test/e2e.py` use) is public and seeded by compose. A test keeps CI and the e2e in sync with it.
 - **Cookies:** the session cookie is `Path=/api`, SameSite=Strict. Every dashboard request sends `X-OpenFleet-Client`; cookie writes without it get 403. nginx forwards `$http_host` (the WS same-origin check needs the port).
 - **Demo keys:** `examples/demo-robot-keys.json` is public and seeded by compose (backend and simulator mount it). Add any new scenario robot or collector test robot there; `test_demo_keys_file_covers_every_bundled_robot` enforces it. The simulator needs `--keys` / `OPENFLEET_ROBOT_KEYS_FILE`; the collector needs `OPENFLEET_API_KEY` or `api_key`.
@@ -136,7 +139,7 @@ docker compose up -d postgres
 1. ~~**CI: re-detection gate.**~~ Done: `e2e-regression-check` runs `openfleet redetect <lidar_regression run> --fail-on-missed --json` and asserts `caught >= 1 and missed == 0`, then checks that the gate exits 1 with `--set topic_degraded_ratio=0.4` (7/15 Hz = 0.47 is no longer below the threshold).
 2. ~~**CI: multi-replica e2e.**~~ Done: compose profile `replicas` (backend-2 + nginx lb), `scripts/multi_replica_e2e.py`, CI job `e2e-multi-replica`. Verified live, including that it fails with Redis stopped.
 3. ~~**Triage audit view.**~~ Done (#026): `triage_actions` table + `GET /triage` + Audit page. Note: only resolves had the actor before; INVESTIGATING was unrecorded, hence a table rather than an events query.
-4. **Login rate limiting.** Throttle failed logins per username and per IP. Redis is now available; nginx `limit_req` is an option too.
+4. ~~**Login rate limiting.**~~ Done (#027): in-app per-username/per-IP windows in Redis (memory fallback), 429 + Retry-After; nginx overwrites `X-Forwarded-For`.
 5. **Store heartbeats per run**, so re-detection liveness matches live (removes the #023 tradeoff).
 6. **Sliding sessions.** Extend a session's expiry while it's in use, up to an absolute maximum.
 7. **Data retention.** Delete or downsample old runs' telemetry after a configurable age, in the sweeper or as a CLI command.

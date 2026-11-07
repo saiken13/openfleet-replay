@@ -27,6 +27,11 @@ class Settings(BaseSettings):
     cookie_secure: bool = False  # set true behind HTTPS
     login_hint: str | None = None  # shown on the login page (e.g. demo credentials)
     ws_reauth_interval_s: float = Field(30.0, gt=0)  # live sockets re-check their session
+    # Login throttling (DECISIONS #027): attempts per fixed window, per username and per
+    # client IP. A successful login doesn't count. 0 disables that scope.
+    login_window_s: float = Field(300.0, gt=0)
+    login_max_failures_per_user: int = Field(5, ge=0)
+    login_max_failures_per_ip: int = Field(20, ge=0)
 
     # Liveness (server time, DECISIONS #010)
     heartbeat_timeout_s: float = Field(10.0, gt=0)

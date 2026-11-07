@@ -223,6 +223,8 @@ Replaying a *recording* doesn't run new robot software, so a recorded run always
 | `SESSION_TTL_S` / `COOKIE_SECURE` | 43200 / false | dashboard session lifetime (absolute); set `COOKIE_SECURE` behind HTTPS |
 | `LOGIN_HINT` | unset | text on the login page (compose: the demo credentials) |
 | `WS_REAUTH_INTERVAL_S` | 30 | how often an open WebSocket re-checks its session/token |
+| `LOGIN_WINDOW_S` / `LOGIN_MAX_FAILURES_PER_USER` / `LOGIN_MAX_FAILURES_PER_IP` | 300 / 5 / 20 | login throttling (#027): failed attempts per window before a 429; 0 disables a scope |
+| `FORWARDED_ALLOW_IPS` (uvicorn, no prefix) | 127.0.0.1 (compose: `*`) | proxies whose `X-Forwarded-For` sets the client IP for the per-IP limit |
 
 **Auth.** Two credential families:
 - **Robots** (DECISIONS #021) use per-robot API keys (`robot_api_keys`) on the writes.
@@ -231,6 +233,7 @@ Replaying a *recording* doesn't run new robot software, so a recorded run always
   - required on every read and WebSocket;
   - roles VIEWER < OPERATOR, where triage needs OPERATOR.
 - All secrets are stored as SHA-256, and passwords with scrypt.
+- Logins are throttled per username and per client IP (#027, `app/services/login_throttle.py`). The counters are in Redis, shared by replicas, or in memory without it.
 - `tests/test_user_auth.py::test_every_api_route_requires_robot_or_user_auth` keeps new routes from shipping open.
 
 ## 10. Known scaling limits

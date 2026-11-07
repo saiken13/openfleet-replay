@@ -86,9 +86,10 @@ docker compose exec backend openfleet users token create ci-bot --label ci --exp
 
 - **Rotating a robot key:** create a new one, deploy it, then revoke the old one. A robot can hold several active keys.
 - **Sessions:** HttpOnly SameSite=Strict cookies that last 12 h.
-- **Production:** behind HTTPS, set `OPENFLEET_COOKIE_SECURE=true`. Drop the demo `*_FILE` and `LOGIN_HINT` settings, and rate-limit `/api/v1/auth/login` at your proxy.
+- **Login throttling:** 5 failed sign-ins per username, or 20 per client IP, in 5 minutes gets a 429 with `Retry-After`. Tune it with `OPENFLEET_LOGIN_*`. Counters are shared across replicas through Redis.
+- **Production:** behind HTTPS, set `OPENFLEET_COOKIE_SECURE=true`. Drop the demo `*_FILE` and `LOGIN_HINT` settings. Don't expose the backend port directly, and set `FORWARDED_ALLOW_IPS` to your proxy's address. The proxy must overwrite `X-Forwarded-For` (see `frontend/nginx.conf`).
 
-See [DECISIONS #021 and #022](docs/DECISIONS.md).
+See [DECISIONS #021, #022 and #027](docs/DECISIONS.md).
 
 ## Connect a real ROS 2 robot
 

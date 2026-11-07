@@ -275,7 +275,7 @@ Both showed up in the first end-to-end demo.
 - Passing the WS token as a query parameter: it leaks into proxy logs.
 **Tradeoffs and migration:**
 - **Breaking API change:** every read and every WebSocket now needs a user. Create users with `openfleet users create`, and give CI and other read scripts an API token (`OPENFLEET_TOKEN`).
-- There's no login rate limiting or lockout yet. The ~50 ms hash slows guessing, but a reachable deployment should rate-limit `/auth/login` at the proxy.
+- There's no login rate limiting or lockout yet. The ~50 ms hash slows guessing, but a reachable deployment should rate-limit `/auth/login` at the proxy. *(Superseded by #027: the app throttles logins itself.)*
 - Session expiry is absolute, not sliding. A user is signed out after 12 h even while active.
 - An open WebSocket can outlive its revocation by up to `WS_REAUTH_INTERVAL_S`.
 - The demo credentials are public. Never set the demo `USERS_FILE` or `LOGIN_HINT` on a reachable deployment.
@@ -375,4 +375,30 @@ Both showed up in the first end-to-end demo.
 **Tradeoffs:**
 - The actor is a username, not a user id. Usernames are unique, users are disabled rather than deleted, and there's no rename. If renames are ever added, store the user id as well.
 - Auto-resolves (hysteresis, run end) aren't triage and aren't in this log. They remain events.
+**Date:** 2026-11-06
+
+## 027 — Login throttling: per-username and per-IP attempt windows, in Redis with an in-memory fallback
+**Status:** Accepted (2026-11-06). Replaces #022's "rate-limit `/auth/login` at the proxy".
+**Decision:**
+- `POST /auth/login` reserves a slot in two fixed-window counters before checking the password: one for the username (lowercased; unknown usernames are counted too) and one for the client IP. If either is over its limit (`LOGIN_MAX_FAILURES_PER_USER` = 5, `LOGIN_MAX_FAILURES_PER_IP` = 20 per `LOGIN_WINDOW_S` = 300 s), the response is **429** with `Retry-After` (seconds to the end of the window), and the password isn't checked. A limit of 0 disables that scope.
+- A successful login clears its username's counter and gives back its IP slot, so only failures use up the limits.
+- Counters are `INCR`+`EXPIRE` in Redis (`openfleet:login:{user|ip}:{window}:{id}`) when `REDIS_URL` is set, so every replica shares them. If Redis is unset or unreachable (0.5 s timeout), they're counted in process memory, with one warning logged per outage.
+- The window index comes from the injected server clock, so tests control it.
+- The client IP is `request.client.host`. Behind the compose nginx it comes from `X-Forwarded-For`: uvicorn trusts it via `FORWARDED_ALLOW_IPS`, and both nginx configs set it to `$remote_addr` (overwrite, never append), because uvicorn uses the first entry.
+- The dashboard shows "Too many sign-in attempts: try again in N s."
+**Why:**
+- Brute force has two shapes: many passwords against one account (stopped by the username limit, from any number of IPs) and one password against many accounts (stopped by the IP limit).
+- Reserving before verifying makes the check atomic. With check-then-record, a burst of parallel requests would all pass while scrypt runs; `tests/test_login_throttle.py` fires 20 at once and exactly 5 get through.
+- In the app rather than nginx `limit_req`: nginx can only limit per IP and per request (not per username, not failures only), and it would have to be configured in every deployment's proxy. Redis is already there for the bus (#025).
+- Counting unknown usernames the same way means a 429 doesn't reveal which accounts exist, matching the indistinguishable 401s from #022.
+- Not clearing the IP counter on success stops an attacker from resetting it by signing in to their own account between guesses.
+**Alternatives considered:**
+- Lockout until an admin unlocks the account: stronger, but turns every guessing attempt into a denial of service against the user and needs an unlock flow.
+- Sliding windows or exponential backoff: smoother, but more state per key. A fixed window allows at most twice the limit across a window boundary, which is fine at these numbers.
+- Failing open when Redis is down: simpler, but it would turn a Redis outage into "no throttling at all". Per-replica counting is weaker but nonzero.
+**Tradeoffs:**
+- Anyone can lock a known username out for up to one window by making 5 wrong attempts. That's the usual cost of per-account limits; the window is short and configurable. API tokens (CLI/CI) aren't affected.
+- Users behind one NAT share the per-IP limit (20 failures per 5 min).
+- `FORWARDED_ALLOW_IPS="*"` in compose means a client calling the published backend port `:8000` directly can choose its own IP and dodge the per-IP limit (not the per-username one). A real deployment shouldn't expose the backend and should set it to the proxy's address.
+- With the memory fallback and N replicas behind round-robin, the effective limit during a Redis outage is up to N times higher.
 **Date:** 2026-11-06
