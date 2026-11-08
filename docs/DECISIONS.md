@@ -729,3 +729,33 @@ Both showed up in the first end-to-end demo.
 - The EPERM check reads the agent's journal; a syscall that failed silently without logging wouldn't show. The full lifecycle passing is the stronger evidence.
 - The guest is a QEMU `virt` machine, not robot hardware; timings describe that machine.
 **Date:** 2026-11-08
+
+## 037 — ROS 2 integration: a separate bridge republishes devices into ROS; the collector reads /diagnostics
+**Status:** Accepted (2026-11-08). The item [EMBEDDED_ROADMAP](EMBEDDED_ROADMAP.md) postponed ("ROS 2 integration").
+**Decision:**
+- **`openfleet-ros-bridge`** (`edge/ros/`, an ament_cmake package; image `edge/ros/Dockerfile` on Jazzy): one rclcpp node, `-p devices:=[URI, ...]`, that runs the edge gateway (edge_core) per device link and republishes:
+  - each SENSOR reading as `std_msgs/Int32` on `/mcu<id>/<sensor>` (sensor-data QoS), through a new `GatewayConfig::on_reading` hook: duplicates and stale frames excluded, and only once the name is settled (DESCRIBE, or the 6 s grace), so no placeholder topics;
+  - the window's nodes (`mcu<id>`, `mcu<id>/<task>`) as `/diagnostics` once a period: RUNNING→OK, DEGRADED→WARN, ERROR→ERROR, STOPPED→STALE, `hardware_id` = the link;
+  - the window's log entries to `/rosout` under `openfleet_ros_bridge.<source>` at their level (link events under the bridge's own name: `GatewayConfig::self_source`).
+  - Its topic rates are not republished: the collector measures the real ROS traffic.
+  - ROS-invalid sensor names are adjusted (`-` → `_`, a leading digit gets `_`).
+- **Collector** (`openfleet_collector/diagnostics.py`): optional `diagnostics_topic`. Each `DiagnosticStatus` becomes a node: OK RUNNING, WARN DEGRADED, ERROR ERROR, STALE STOPPED, unknown levels DEGRADED. A status not refreshed for `diagnostics_stale_s` (5 s) is STOPPED. At most 256 names; graph-watched nodes win a name clash.
+- **E2E** (`edge/ros/e2e.py`, compose profile `ros`, ROS domain 43): `ros-device-sim` → `ros-bridge` → `ros-mcu-collector` → robot `ros-mcu-01`. CI runs it beside the collector e2e (matrix).
+**Why:**
+- **Not in the agent**, as the roadmap first said. On a ROS robot the collector is the robot's one sender; the agent uplinking the same robot would collide on runs (the reason for #032's "own robot" rule). A ROS-native node also fits how ROS robots are deployed (launch files, parameters).
+- **Same gateway code**: naming, duplicate/loss handling, resets and the reset hold (#034) behave identically whether a device reaches OpenFleet through the agent or through ROS.
+- **`/diagnostics` is ROS's standard hardware-health channel.** Teaching the collector to read it helps any ROS driver that reports there, not just this bridge.
+- **Raw `Int32` readings**: they make the topics real (rates measured by the collector, data usable by other ROS nodes) without inventing message types. Units stay sensor-specific, as on the wire.
+**Verified (dev Mac, arm64 Docker):**
+- `edge/ros/e2e.py` PASS, all six steps: imu ~50 Hz and range ~10 Hz HEALTHY on the ROS topics; device, tasks and the bridge RUNNING; a stopped sensor → CRITICAL `topic_rate:/mcu1/range`, resolved; a watchdog reset → WARN log, `mcu1` DEGRADED, `node_health:mcu1` opened and resolved after the hold; a failed task → `node_health:mcu1/comms`; a silent device → STALE → STOPPED; the bridge stopped → bridge STOPPED, `mcu1` STOPPED (diagnostics stale), imu FAILED, then everything back. One run throughout.
+- `ros2 topic hz` inside the bridge container: 49.98 Hz and 9.98 Hz.
+- The existing collector e2e still passes; collector unit tests 28 (4 new); C/C++ 109 (1 new: `on_reading`).
+**Alternatives considered:**
+- The agent publishes to ROS (the roadmap's sketch): links rclcpp into the agent and still leaves two senders on one robot.
+- Typed messages (`sensor_msgs/Imu`, `Range`): the protocol carries one int32 per reading with device-defined units; mapping to typed messages needs per-sensor configuration the device doesn't send.
+- Device health as ROS graph nodes (one rclcpp node per task): invents processes that don't exist; `/diagnostics` says what it is.
+**Tradeoffs:**
+- Expected rates live in the collector config, not taken from DESCRIBE (the agent path gets them automatically). The bridge could publish them as diagnostic key-values later.
+- A reading is published on the device thread under the gateway's lock; publishing is quick, but a very slow DDS layer would delay frame handling.
+- Readings carry no timestamp (`Int32` has no header); fine for rates, not for fusing data.
+**Date:** 2026-11-08

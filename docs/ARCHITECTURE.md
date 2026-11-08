@@ -11,6 +11,7 @@ flowchart LR
         SIM["Simulator<br/>(MVP)"]
         ROS["ROS 2 Collector<br/>(collector/)"]
         EDGE["C++ edge agent<br/>(edge/)"]
+        BRIDGE["ROS bridge<br/>(edge/ros/)"]
         MCU["Microcontrollers: device simulator (mcu1),<br/>FreeRTOS firmware on Renode STM32F4 (mcu2)"]
     end
 
@@ -31,6 +32,8 @@ flowchart LR
     ROS -. "same API" .-> R
     EDGE -. "same API" .-> R
     MCU -. "COBS+CRC frames<br/>UART / TCP" .-> EDGE
+    MCU -. "same frames" .-> BRIDGE
+    BRIDGE -. "ROS 2 topics,<br/>/diagnostics, /rosout" .-> ROS
     R --> S
     SW --> S
     S --> REP --> PG
@@ -51,8 +54,9 @@ The backend stores those summaries. It decides whether something is unhealthy an
 |---|---|---|
 | **Simulator** (`simulator/`) | Simulates N robots: registration, heartbeats, runs, metrics, topic rates, node states, logs. Runs scripted failure **scenarios** (YAML) with a seeded RNG so failures are reproducible. It is the reference client for the API. | Import backend code. It may only use the public HTTP API. |
 | **C++ edge agent** (`edge/`) | Robot-side C++20 agent for Linux robot computers without ROS ([EMBEDDED_ROADMAP](EMBEDDED_ROADMAP.md), #031, #032). It samples `/proc` (CPU, memory, watched processes, its own health), measures link latency, and delivers batches with the collector's uplink contract as its own robot (e.g. `edge-01`). Threads: sampler → bounded queue → uplink, plus signals; SIGTERM ends the run ABORTED. As a **gateway** (#033) it reads microcontrollers over the [device protocol](PROTOCOL.md) (`protocol/`, C11, shared with the firmware): sensors → topics, tasks → nodes, resets and link errors → log events. A device that resets unexpectedly is held DEGRADED for 20 s (#034). |
+| **ROS bridge** (`edge/ros/`, `openfleet-ros-bridge`) | On a ROS robot, republishes microcontrollers into ROS 2 with the edge gateway's code (#037): each reading on `/mcu<id>/<sensor>`, device and task health on `/diagnostics`, resets and device logs on `/rosout`. The robot's collector reports them. | Talk to OpenFleet: the collector is that robot's one sender. |
 | **Firmware** (`firmware/`) | FreeRTOS on an STM32F407, run only on Renode's emulated STM32F4 ([FIRMWARE.md](FIRMWARE.md), #034). Sensor, comms, health and watchdog tasks; a supervisor-gated IWDG; a boot record for the reset cause. It speaks the device protocol with the same `protocol/` library. | Know about OpenFleet's API: it only frames data for the gateway. | Share a run with another sender (seq collisions); judge health itself. |
-| **ROS 2 collector** (`collector/`) | On the robot. Raw best-effort subscriptions count topic arrivals in a sliding window. Node liveness comes from the ROS graph, logs from `/rosout` (WARN+), battery from `BatteryState`, and CPU/memory from psutil. It POSTs the same `TelemetryBatch` as the simulator. Its uplink buffers through outages and self-heals runs (DECISIONS #020). | Deserialize messages or run inside the robot's own process. |
+| **ROS 2 collector** (`collector/`) | On the robot. Raw best-effort subscriptions count topic arrivals in a sliding window. Node liveness comes from the ROS graph (and, optionally, `/diagnostics` statuses, #037), logs from `/rosout` (WARN+), battery from `BatteryState`, and CPU/memory from psutil. It POSTs the same `TelemetryBatch` as the simulator. Its uplink buffers through outages and self-heals runs (DECISIONS #020). | Deserialize messages or run inside the robot's own process. |
 | **API routers** (`backend/app/api/`) | HTTP/WS boundary: parse and validate input with Pydantic, call a service, map domain errors to HTTP codes. | Contain business rules or SQL. |
 | **Services** (`backend/app/services/`) | Use-case logic: "ingest a batch", "process a heartbeat", "open/resolve incidents". They own transaction boundaries and call the detection engine and realtime hub. | Know about HTTP. |
 | **Repositories** (`backend/app/repositories/`) | All SQL for one aggregate (robots, runs, telemetry, events, incidents). Return ORM or domain objects. | Make business decisions. |

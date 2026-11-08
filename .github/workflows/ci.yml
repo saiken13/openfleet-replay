@@ -205,18 +205,27 @@ jobs:
       - run: pytest -v
 
   # Real ROS 2 Jazzy: a fake robot publishing /scan + the collector + the backend.
+  # The collector on ROS 2 Jazzy, and (#037) a microcontroller republished into ROS by
+  # openfleet-ros-bridge and reported by that robot's collector. Parallel, like the edge e2e.
   ros2-collector-e2e:
     runs-on: ubuntu-latest
     needs: [backend, collector]
+    strategy:
+      fail-fast: false
+      matrix:
+        script: [collector/ros_test/e2e.py, edge/ros/e2e.py]
+    name: ros2-collector-e2e (${{ matrix.script }})
+    env:
+      PYTHONUNBUFFERED: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
       - run: pip install httpx
-      - run: python collector/ros_test/e2e.py
+      - run: python ${{ matrix.script }}
       - if: failure()
-        run: docker compose --profile ros logs ros-collector ros-robot backend
+        run: docker compose --profile ros logs ros-collector ros-robot ros-bridge ros-mcu-collector ros-device-sim backend
 
   # The product's own story, as a gate: a healthy run must pass the regression config,
   # and the scripted LiDAR regression must FAIL it (exit code 1).

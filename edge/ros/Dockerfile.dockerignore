@@ -1,0 +1,5 @@
+# Build context is the repo root (the agent needs edge/ and protocol/); send only those.
+*
+!edge
+!protocol
+edge/build

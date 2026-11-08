@@ -14,6 +14,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <mutex>
 #include <optional>
@@ -40,6 +41,14 @@ struct GatewayConfig {
   // (sensor<N>, task<N>) only after this long, longer than the device's DESCRIBE period, so
   // a gateway joining mid-stream doesn't leave placeholder topics and nodes behind.
   std::chrono::milliseconds describe_grace{6000};
+  // Every new SENSOR reading (duplicates and stale frames excluded), with the same topic name
+  // the window reports, once that name is settled (described, or after describe_grace). For
+  // republishing readings, e.g. as ROS 2 topics (edge/ros/). Called on the device thread with
+  // the gateway's lock held: it must be quick and must not call back into the Gateway.
+  std::function<void(const std::string& topic, std::int32_t value)> on_reading;
+  // Source of the gateway's own log lines (link up/down, error summaries): the agent's node.
+  // The ROS bridge leaves it empty and logs them under its own name.
+  std::string self_source = "edge_agent";
 };
 
 struct LinkStats {
@@ -123,6 +132,7 @@ class Gateway {
              SystemTime wall);
   void add_log(LogLevel level, std::string source, std::string message, SystemTime wall);
   [[nodiscard]] std::string device_name(const Device& d) const;
+  [[nodiscard]] bool name_settled(const Sensor& s, Clock::time_point now) const;
 
   GatewayConfig config_;
   mutable std::mutex mutex_;

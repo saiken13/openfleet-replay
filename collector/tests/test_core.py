@@ -7,6 +7,7 @@ from pydantic import ValidationError
 
 from openfleet_collector.batch import LogBuffer, build_batch, clamp_pct, node_states
 from openfleet_collector.config import CollectorConfig, load_config
+from openfleet_collector.diagnostics import DiagnosticsTracker, merge_nodes
 from openfleet_collector.rates import RateTracker
 
 T = datetime(2026, 11, 5, 12, 0, tzinfo=timezone.utc)
@@ -124,3 +125,46 @@ def test_config(tmp_path) -> None:
         CollectorConfig.model_validate({"robot_id": "bad id"})
     with pytest.raises(ValidationError):
         CollectorConfig.model_validate({"robot_id": "r1", "topicz": {}})
+
+
+def test_diagnostics_levels_become_node_states() -> None:
+    d = DiagnosticsTracker(stale_after_s=5)
+    d.record("mcu1", 0, now=10)
+    d.record("/mcu1/sensor", 1, now=10)
+    d.record("mcu1/comms", 2, now=10)
+    d.record("mcu2", 3, now=10)
+    d.record("mcu3", 7, now=10)  # unknown level: not health
+    assert d.snapshot(now=11) == [
+        {"node": "mcu1", "state": "RUNNING"},
+        {"node": "mcu1/comms", "state": "ERROR"},
+        {"node": "mcu1/sensor", "state": "DEGRADED"},
+        {"node": "mcu2", "state": "STOPPED"},
+        {"node": "mcu3", "state": "DEGRADED"},
+    ]
+
+
+def test_diagnostics_status_that_stops_arriving_is_stopped() -> None:
+    d = DiagnosticsTracker(stale_after_s=5)
+    d.record("mcu1", 0, now=10)
+    assert d.snapshot(now=15) == [{"node": "mcu1", "state": "RUNNING"}]
+    assert d.snapshot(now=15.1) == [{"node": "mcu1", "state": "STOPPED"}]
+    d.record("mcu1", 0, now=16)  # the publisher is back
+    assert d.snapshot(now=16) == [{"node": "mcu1", "state": "RUNNING"}]
+
+
+def test_diagnostics_are_bounded_and_ignore_blank_names() -> None:
+    d = DiagnosticsTracker(max_statuses=2)
+    for name in ("a", "b", "c", "  "):
+        d.record(name, 0, now=1)
+    assert [n["node"] for n in d.snapshot(now=1)] == ["a", "b"]
+    d.record("a", 2, now=2)  # known names still update when full
+    assert d.snapshot(now=2)[0] == {"node": "a", "state": "ERROR"}
+
+
+def test_graph_nodes_win_over_diagnostics_with_the_same_name() -> None:
+    graph = [{"node": "lidar_driver", "state": "STOPPED"}]
+    diag = [{"node": "lidar_driver", "state": "RUNNING"}, {"node": "mcu1", "state": "RUNNING"}]
+    assert merge_nodes(graph, diag) == [
+        {"node": "lidar_driver", "state": "STOPPED"},
+        {"node": "mcu1", "state": "RUNNING"},
+    ]

@@ -46,6 +46,10 @@ Gateway::Gateway(GatewayConfig config) : config_(std::move(config)) {
 
 std::string Gateway::device_name(const Device& d) const { return std::format("mcu{}", d.id); }
 
+bool Gateway::name_settled(const Sensor& s, Clock::time_point now) const {
+  return s.described || (s.first_seen && now - *s.first_seen >= config_.describe_grace);
+}
+
 void Gateway::add_log(LogLevel level, std::string source, std::string message, SystemTime wall) {
   if (logs_.size() >= config_.max_logs_per_window) {
     ++stats_.logs_dropped;
@@ -75,7 +79,7 @@ void Gateway::on_bytes(std::span<const std::uint8_t> data, Clock::time_point now
 void Gateway::on_link(bool up, const std::string& detail, SystemTime wall) {
   const std::lock_guard lock(mutex_);
   ofp_decoder_init(&decoder_);  // a partial frame from the old connection means nothing now
-  add_log(up ? LogLevel::kInfo : LogLevel::kWarn, "edge_agent",
+  add_log(up ? LogLevel::kInfo : LogLevel::kWarn, config_.self_source,
           std::format("device link {} {}{}", config_.link, up ? "connected" : "lost",
                       detail.empty() ? "" : ": " + detail),
           wall);
@@ -230,6 +234,9 @@ void Gateway::handle(const ofp_frame& f, Clock::time_point now, SystemTime wall)
       }
       ++sensor.count;
       sensor.last = now;
+      if (config_.on_reading && name_settled(sensor, now)) {
+        config_.on_reading("/" + device_name(d) + "/" + sensor.name, s.value);
+      }
       break;
     }
     case OFP_DESCRIBE: {
@@ -324,7 +331,7 @@ void Gateway::contribute(Sample& sample, Clock::time_point now) {
       }
     }
     for (auto& [sid, s] : d.sensors) {
-      if (!s.described && (!s.first_seen || now - *s.first_seen < config_.describe_grace)) {
+      if (!name_settled(s, now)) {
         s.count = 0;
         continue;
       }
@@ -346,7 +353,7 @@ void Gateway::contribute(Sample& sample, Clock::time_point now) {
     const auto delta = [this](std::uint64_t LinkStats::*field) {
       return stats_.*field - reported_.*field;
     };
-    add_log(LogLevel::kWarn, "edge_agent",
+    add_log(LogLevel::kWarn, config_.self_source,
             std::format("device link {}: {} bad frames (crc {}, short {}, cobs {}, overflow {}, "
                         "version {}, length {}, payload {}); {} lost, {} duplicates; {} good",
                         config_.link, new_bad, delta(&LinkStats::crc),

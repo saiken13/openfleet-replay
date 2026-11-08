@@ -30,6 +30,7 @@ OpenFleet Replay collects robot telemetry and tracks the health of ROS topics an
 - **ROS 2 collector:** runs on the robot.
   - Measures every configured topic's real rate (raw, best-effort subscriptions, with message types auto-discovered).
   - Watches nodes in the ROS graph, forwards `/rosout` warnings, and reports battery, CPU and memory.
+  - Optionally reads `/diagnostics`: each hardware status becomes a node OpenFleet can judge.
   - Keeps buffering through network outages without losing data.
   - Tested end to end on ROS 2 Jazzy in CI.
 - **Simulator:** no robot required. Seeded YAML scenarios script failures, so every demo is reproducible.

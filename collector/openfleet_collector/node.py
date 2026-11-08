@@ -20,6 +20,7 @@ from rosidl_runtime_py.utilities import get_message
 
 from openfleet_collector.batch import LogBuffer, build_batch, node_states
 from openfleet_collector.config import CollectorConfig
+from openfleet_collector.diagnostics import DiagnosticsTracker, merge_nodes
 from openfleet_collector.rates import RateTracker
 from openfleet_collector.uplink import Uplink
 
@@ -41,6 +42,7 @@ class CollectorNode(Node):
         )
         self.logs = LogBuffer(cfg.forward_log_level)
         self.battery_pct: float | None = None
+        self.diagnostics = DiagnosticsTracker(cfg.diagnostics_stale_s)
         self._subscribed: dict[str, str] = {}  # topic -> type name
         psutil.cpu_percent(interval=None)  # prime the CPU counter
 
@@ -50,6 +52,12 @@ class CollectorNode(Node):
 
             self.create_subscription(
                 BatteryState, cfg.battery_topic, self._on_battery, qos_profile_sensor_data
+            )
+        if cfg.diagnostics_topic:
+            from diagnostic_msgs.msg import DiagnosticArray
+
+            self.create_subscription(
+                DiagnosticArray, cfg.diagnostics_topic, self._on_diagnostics, 50
             )
         self.create_timer(cfg.window_s, self._tick)
         self._discover_topics()
@@ -88,6 +96,14 @@ class CollectorNode(Node):
             return  # don't echo our own logs back
         self.logs.add(msg.level, msg.name, msg.msg)
 
+    def _on_diagnostics(self, msg) -> None:  # diagnostic_msgs/DiagnosticArray
+        now = time.monotonic()
+        for status in msg.status:
+            level = status.level
+            self.diagnostics.record(
+                status.name, level[0] if isinstance(level, bytes) else int(level), now
+            )
+
     def _on_battery(self, msg) -> None:  # sensor_msgs/BatteryState
         p = msg.percentage
         self.battery_pct = None if (p is None or math.isnan(p)) else p * 100.0
@@ -103,7 +119,10 @@ class CollectorNode(Node):
             seq=self.uplink.next_seq(),
             ts=datetime.now(timezone.utc),
             rates=self.rates.snapshot(now),
-            nodes=node_states(self.cfg.node_names(), present, report_missing=not in_grace),
+            nodes=merge_nodes(
+                node_states(self.cfg.node_names(), present, report_missing=not in_grace),
+                self.diagnostics.snapshot(now),
+            ),
             cpu_pct=psutil.cpu_percent(interval=None),
             mem_pct=psutil.virtual_memory().percent,
             battery_pct=self.battery_pct,

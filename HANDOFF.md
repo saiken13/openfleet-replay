@@ -7,14 +7,22 @@
 - **Latest commit:** see `git log -1`
 
 ## Current state
-**Full-system QEMU done (2026-11-08, DECISIONS #036): the edge agent as a systemd service on Debian 13 arm64 in `qemu-system-aarch64`.** The last open item of the embedded roadmap.
+**ROS 2 integration done (2026-11-08, DECISIONS #037): `openfleet-ros-bridge` republishes microcontrollers into ROS 2; the collector reads `/diagnostics`.** The item the embedded roadmap had postponed.
+- **Bridge** (`edge/ros/`, ament_cmake, image `edge/ros/Dockerfile` on Jazzy; `-p devices:=[URI,...]`): the edge gateway per link. Readings → `std_msgs/Int32` on `/mcu<id>/<sensor>`; device/task health → `/diagnostics`; resets and device logs → `/rosout`. It never talks to OpenFleet (the collector is the robot's one sender).
+  - Gateway additions: `GatewayConfig::on_reading` (each new reading, once its name is settled) and `self_source` (who the link events are logged as). 1 new test; C/C++ 109.
+- **Collector:** optional `diagnostics_topic` (`openfleet_collector/diagnostics.py`): OK/WARN/ERROR/STALE → RUNNING/DEGRADED/ERROR/STOPPED, silent 5 s → STOPPED, ≤ 256 names, graph nodes win clashes. 4 new tests (28).
+- **E2E:** `python edge/ros/e2e.py` (compose profile `ros`: `ros-device-sim`, `ros-bridge`, `ros-mcu-collector`, ROS domain 43, robot `ros-mcu-01` + demo key). 6 steps PASS locally (stopped sensor, watchdog reset, failed task, silent device, bridge down/up; one run). The existing `collector/ros_test/e2e.py` still passes. CI: `ros2-collector-e2e` is now a 2-script matrix. **Not yet run on GitHub.**
+- **QEMU follow-up:** the first GitHub `qemu-system` run failed (QEMU had no `efi-virtio.rom`; fixed in 41f7f6e with `romfile=` + fail-fast). The rerun (Nightly 42514767161) was still in progress at handoff, past boot. Check it.
+- **Next:** nothing planned; the remaining options (OIDC, multi-tenancy, scale infrastructure) need the owner's decisions.
+
+**Earlier: full-system QEMU (2026-11-08, DECISIONS #036).** The edge agent as a systemd service on Debian 13 arm64 in `qemu-system-aarch64`. The last open item of the embedded roadmap.
 - **E2E:** `python edge/qemu/qemu_e2e.py` (`--accel tcg` emulates as CI does; `--report FILE`). A pinned cloud image (SHA-512), cloud-init seeded over HTTP from the script (no ISO tools), the shipped unit installed unchanged plus an `ExecStart` drop-in.
   - 7 steps: boot as a DynamicUser with the guest's /proc; a root-owned watched process (`demo-worker`) RUNNING → STOPPED → RUNNING; hardening (no caps, NoNewPrivs, MemoryMax, exposure ≤ 1.5); SIGKILL → restart → new run; stop → ABORTED; reboot → ABORTED during shutdown + new run at boot; poweroff → ABORTED; no EPERM.
   - Guest binary: `edge/qemu/Dockerfile.build` (trixie; native on arm64, cross with multiarch libcurl on x86_64).
 - **Unit hardened** (found by the first run, exposure 3.4 → 1.2): PrivateUsers, ProtectClock/Hostname/KernelLogs, RestrictRealtime/SUIDSGID, UMask, a `@system-service` syscall filter. The unit's header documents the drop-in a serial device needs (`PrivateDevices=yes` hides `/dev/tty*`).
 - **Nightly:** new job `qemu-system` (TCG on the x86_64 runner, image cached); the report has a section for it and fails if it fails. New demo key `edge-vm-01`.
 - **Verified locally (M2):** HVF 7/7 (boot → first run 25 s, reboot → new run 24 s); TCG 7/7 in 3 min; the cross build's commands in an emulated amd64 container; the report and its failure path. **Not yet run on GitHub**: trigger a manual Nightly and watch `qemu-system` (TCG on x86 is the slow path).
-- **Next:** nothing planned; see "Recommended next task" for the owner's options.
+- ROS 2 integration followed (above).
 
 **Earlier: pushed and verified on GitHub (2026-11-08).** Commits f9881da (BUG-006/007), fc3dfd5 (embedded Phases 0–4), 63062cb (CI fixes), 432131c (parallel edge e2e).
 - **CI: all green on GitHub** (63062cb and 432131c), every embedded job included.
@@ -297,7 +305,7 @@ scripts/edge-dev.sh bash -c 'cmake --preset fuzz && cmake --build --preset fuzz'
 **Embedded expansion** ([docs/EMBEDDED_ROADMAP.md](docs/EMBEDDED_ROADMAP.md)): Phases 0–4 are done. Left over, each needing the owner's go:
 - ~~Push and watch `CI` and a manual `Nightly` on GitHub.~~ Done 2026-11-08 (see Current state).
 - ~~The optional full-system QEMU (Debian arm64 + the agent as a systemd service).~~ Done 2026-11-08 (#036).
-- Postponed from the roadmap: ROS 2 integration (the agent republishes MCU data as ROS topics).
+- ~~Postponed from the roadmap: ROS 2 integration.~~ Done 2026-11-08 (#037), as `openfleet-ros-bridge`.
 
 **Not in the batch: these need the owner's decisions first.**
 - OIDC: which provider; auto-create users or invite only?

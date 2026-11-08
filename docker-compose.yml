@@ -136,6 +136,41 @@ services:
       backend:
         condition: service_healthy
 
+  # A microcontroller on a ROS robot (DECISIONS #037): the device simulator, the ROS bridge
+  # that republishes it (sensors -> topics, health -> /diagnostics, logs -> /rosout), and the
+  # collector that reports it all as robot ros-mcu-01. Own ROS domain (43), so the fake robot
+  # above stays separate. E2E check: python edge/ros/e2e.py
+  ros-device-sim:
+    build:
+      context: .
+      dockerfile: edge/docker/Dockerfile.agent
+    image: openfleet-edge-agent
+    profiles: [ros]
+    entrypoint: ["openfleet-device-sim", "--listen", "4000", "--control-file", "/tmp/devsim.ctl"]
+    stop_grace_period: 2s
+
+  ros-bridge:
+    build:
+      context: .
+      dockerfile: edge/ros/Dockerfile
+    image: openfleet-ros-bridge
+    profiles: [ros]
+    command: ["openfleet-ros-bridge", "--ros-args", "-p", "devices:=[tcp://ros-device-sim:4000]"]
+    environment:
+      ROS_DOMAIN_ID: "43"
+    depends_on:
+      - ros-device-sim
+
+  ros-mcu-collector:
+    build: ./collector
+    profiles: [ros]
+    command: ["openfleet-collector", "--config", "ros_test/collector.mcu.yaml"]
+    environment:
+      ROS_DOMAIN_ID: "43"
+    depends_on:
+      backend:
+        condition: service_healthy
+
   # C++ edge agent (edge/, docs/EMBEDDED_ROADMAP.md Phases 1-2) as robot edge-01, plus a
   # stand-in "robot process" it watches (in the agent's PID namespace) and a simulated
   # microcontroller on a TCP "UART" (docs/PROTOCOL.md). Opt in:

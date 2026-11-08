@@ -26,6 +26,24 @@ Delivery uses the ROS collector's contract:
 
 **SIGTERM/SIGINT** flushes for at most 5 s, then ends the run **ABORTED**. `--duration S` ends it **SUCCESS**.
 
+## On a ROS 2 robot: `openfleet-ros-bridge` (DECISIONS #037)
+
+On a ROS robot the ROS collector is already the robot's sender, so a second sender (this agent) would collide on its runs. Instead, `ros/` builds a small ROS 2 node from the same gateway code that republishes devices into ROS, where the collector picks them up:
+
+| ROS 2 | From the device |
+|---|---|
+| `std_msgs/Int32` on `/mcu<id>/<sensor>` (sensor-data QoS) | each reading, as it arrives (duplicates dropped) |
+| `/diagnostics` (`DiagnosticArray`, once a second) | `mcu<id>` and `mcu<id>/<task>`: RUNNING OK, DEGRADED WARN, ERROR ERROR, STOPPED STALE |
+| `/rosout`, logger `openfleet_ros_bridge.mcu<id>` | resets, device log lines, low stack, link-error summaries |
+
+```bash
+. /opt/ros/jazzy/setup.sh
+cmake -S edge/ros -B build/ros -G Ninja && cmake --build build/ros   # or colcon
+build/ros/openfleet-ros-bridge --ros-args -p devices:="[serial:/dev/ttyUSB0@115200]"
+```
+
+Then list the topics (expected Hz) in the collector's `topics:` and set `diagnostics_topic: /diagnostics` (example: `collector/ros_test/collector.mcu.yaml`). Sensor names that aren't valid ROS names are adjusted (`imu-2` → `imu_2`, `9dof` → `_9dof`). E2E: `python edge/ros/e2e.py` (compose profile `ros`).
+
 ## Run it
 
 ```bash
@@ -104,4 +122,5 @@ Execution environments, kept distinct:
 - `e2e/e2e.py`, `e2e/device_e2e.py`: drive the compose `edge` profile. `e2e/run_scenarios.py` + `e2e/scenarios/*.yaml`: the measured regression tier.
 - `bench/`: micro-benchmarks (`edge_bench`).
 - `docker/`: `Dockerfile.dev` (toolchain) and `Dockerfile.agent` (the agent image).
+- `ros/`: `openfleet-ros-bridge`, the gateway republished into ROS 2 (an ament package; `ros/Dockerfile`), and its e2e.
 - `packaging/`: the systemd unit. `qemu/`: the full-system e2e and the guest's build. `cmake/toolchains/`: the cross toolchain files.

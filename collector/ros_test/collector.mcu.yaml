@@ -1,0 +1,15 @@
+# Robot ros-mcu-01 (compose profile `ros`, DECISIONS #037): a ROS robot whose microcontroller
+# is republished by openfleet-ros-bridge. The bridge never talks to OpenFleet; this collector
+# is the robot's one sender.
+api_url: http://backend:8000
+robot_id: ros-mcu-01
+api_key: ofk_demo_ros-mcu-01_public-not-secret  # examples/demo-robot-keys.json
+robot_name: ROS robot with an MCU
+robot_model: Jazzy container + device-sim
+software_version: "0.1.0-test"
+topics:
+  /mcu1/imu: 50
+  /mcu1/range: 10
+nodes: [openfleet_ros_bridge]
+diagnostics_topic: /diagnostics
+forward_log_level: WARN

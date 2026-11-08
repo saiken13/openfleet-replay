@@ -18,4 +18,6 @@ nodes:                        # nodes that must be alive (`ros2 node list`)
   - controller_server
 
 battery_topic: /battery_state # sensor_msgs/BatteryState (optional)
+# diagnostics_topic: /diagnostics  # diagnostic_msgs/DiagnosticArray: each status is a node
+#                                  # (OK RUNNING, WARN DEGRADED, ERROR ERROR, STALE STOPPED)
 forward_log_level: WARN       # /rosout lines at or above this level become OpenFleet events

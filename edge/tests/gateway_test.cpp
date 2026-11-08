@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <map>
 #include <thread>
 
 #include "openfleet/edge/device_sim.hpp"
@@ -342,6 +343,40 @@ TEST_F(GatewayTest, LinkUpAndDownAreLogged) {
 }
 
 // TSan: the device thread feeds bytes while the sampler thread takes windows.
+TEST(GatewayReadings, EveryNewReadingIsPassedOnUnderItsTopicNameDuplicatesAreNot) {
+  std::map<std::string, std::vector<std::int32_t>> got;
+  GatewayConfig c;
+  c.link = "test://link";
+  c.on_reading = [&](const std::string& topic, std::int32_t value) {
+    got[topic].push_back(value);
+  };
+  Gateway gw(c);
+  Clock::time_point t(1000s);
+  SimConfig sc;
+  sc.seed = 42;
+  DeviceSim sim(sc, t);
+  const DeviceSim::Sink sink = [&](std::span<const std::uint8_t> b) { gw.on_bytes(b, t); };
+  auto run = [&](Clock::duration d) {
+    const auto end = t + d;
+    while (t < end) {
+      t += 5ms;
+      sim.tick(t, sink);
+    }
+  };
+  run(1s);
+  got.clear();
+  run(2s);
+  ASSERT_EQ(got.size(), 2U);  // the described names only, no placeholders
+  EXPECT_NEAR(static_cast<double>(got["/mcu1/imu"].size()), 100.0, 3.0);
+  EXPECT_NEAR(static_cast<double>(got["/mcu1/range"].size()), 20.0, 2.0);
+
+  ASSERT_FALSE(sim.command("duplicate 1", t, sink).has_value());
+  got.clear();
+  run(2s);
+  EXPECT_GT(gw.stats().duplicates, 100U);
+  EXPECT_NEAR(static_cast<double>(got["/mcu1/imu"].size()), 100.0, 3.0);  // not doubled
+}
+
 TEST(GatewayThreads, FeedingAndSamplingConcurrentlyIsSafe) {
   Gateway gw({});
   std::atomic<bool> done{false};

@@ -29,6 +29,11 @@ class CollectorConfig(BaseModel):
     # ROS node names to watch (as shown by `ros2 node list`, with or without leading '/')
     nodes: list[str] = []
     battery_topic: str | None = Field(None, description="sensor_msgs/BatteryState topic")
+    # diagnostic_msgs/DiagnosticArray topic (e.g. /diagnostics): each status becomes a node
+    # (OK RUNNING, WARN DEGRADED, ERROR ERROR, STALE STOPPED; silent for diagnostics_stale_s
+    # STOPPED). The device bridge (edge/ros/) reports microcontrollers this way.
+    diagnostics_topic: str | None = None
+    diagnostics_stale_s: float = Field(5.0, gt=0)
     forward_log_level: Literal["DEBUG", "INFO", "WARN", "ERROR", "FATAL"] = "WARN"
 
     buffer_max_batches: int = Field(600, ge=10, description="batches kept while offline")

@@ -19,7 +19,7 @@
 | 7. Regression workflow | Inside phases + a slow nightly CI tier; reuses `openfleet check` / `redetect` |
 | 8. Deployment/debugging | Sanitizers + systemd unit (Phase 1), firmware GDB via Renode (Phase 3); full-system QEMU (#036) |
 | 9. Performance | Phase 4, measured and labelled by environment |
-| 5. ROS 2 integration | **Postponed.** Later: the agent republishes MCU data as ROS topics, so the existing collector monitors them |
+| 5. ROS 2 integration | Postponed, then done (#037) as a separate `openfleet-ros-bridge` rather than in the agent: on a ROS robot the collector is the one sender |
 
 **Avoid:** Wokwi as the primary simulator (the CLI needs a cloud token), Yocto/Buildroot, a hand-written HTTP stack, a C++ copy of the ROS collector, MCU-specific backend tables or rules, and real-time claims.
 
