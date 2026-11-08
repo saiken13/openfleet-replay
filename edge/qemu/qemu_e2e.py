@@ -169,8 +169,9 @@ def accel(force_tcg: bool = False) -> tuple[list[str], str]:
         return ["-accel", "hvf", "-cpu", "host"], "QEMU, HVF-accelerated (arm64 host)"
     if arm64_host and os.access("/dev/kvm", os.R_OK | os.W_OK):
         return ["-accel", "kvm", "-cpu", "host"], "QEMU, KVM-accelerated (arm64 host)"
-    # pauth-impdef: the architected pointer-auth algorithm is very slow to emulate.
-    return ["-accel", "tcg", "-cpu", "max,pauth-impdef=on"], f"QEMU, emulated (TCG on {machine})"
+    # A concrete CPU, not `max`: Ubuntu's edk2 (2025.11, the CI runner's) hangs right after its
+    # banner with `-cpu max`, and neoverse-n1 has no pointer auth, which is slow to emulate.
+    return ["-accel", "tcg", "-cpu", "neoverse-n1"], f"QEMU, emulated (TCG on {machine})"
 
 
 class SeedServer:
