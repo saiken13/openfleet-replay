@@ -785,7 +785,7 @@ Both showed up in the first end-to-end demo.
 - SPA-side OIDC (tokens in the browser): a second auth model next to the session cookie, and tokens exposed to JS.
 - Auto-creating any verified Google account: see "explicit access".
 **Tradeoffs:**
-- Not exercised against Google with a real client: that needs the owner's OAuth client. The protocol path up to Google's login page is verified live; the rest against the fake provider.
+- Verified end to end with Google on 2026-11-08: the owner's OAuth client (testing mode), an invited `--sso` operator; the first sign-in linked the account to its Google subject.
 - Group/role claims are not mapped; roles are managed in OpenFleet (`openfleet users set-role`).
 - One provider at a time.
 **Date:** 2026-11-08
