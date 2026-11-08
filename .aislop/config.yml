@@ -1,0 +1,34 @@
+# aislop (https://github.com/scanaislop/aislop) settings. Each exception says why.
+version: 1
+
+telemetry:
+  enabled: false
+
+imports:
+  # ROS 2 Python packages come from the ROS install (apt / the ros:jazzy image), not pip.
+  provided:
+    - rclpy
+    - sensor_msgs
+    - std_msgs
+    - diagnostic_msgs
+    - rcl_interfaces
+    - rosidl_runtime_py
+
+overrides:
+  # Command-line tools: printing to stdout is their output, not leftover debugging.
+  - files: ["backend/openfleet_cli/**"]
+    rules:
+      ai-slop/python-print-debug: off
+  # FastAPI injects dependencies as parameters (session, auth, path, body, ...).
+  - files: ["backend/app/api/**"]
+    rules:
+      complexity/too-many-params: off
+  # Build-time overrides set with -DOPENFLEET_EDGE_VERSION=...; must stay a macro.
+  - files: ["edge/src/agent.cpp", "edge/src/curl_client.cpp"]
+    rules:
+      ai-slop/cpp-define-constant: off
+  # Migrations and end-to-end test drivers read top to bottom as one script on purpose.
+  - files: ["backend/alembic/versions/**", "**/e2e.py", "edge/qemu/qemu_e2e.py"]
+    rules:
+      complexity/function-too-long: off
+      complexity/file-too-large: off

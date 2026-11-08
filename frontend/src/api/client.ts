@@ -35,7 +35,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const resp = await fetch(BASE + path, {
     ...init,
     credentials: "same-origin", // the HttpOnly session cookie
-    headers: { "content-type": "application/json", [CLIENT_HEADER]: "dashboard", ...(init?.headers ?? {}) },
+    headers: { "content-type": "application/json", [CLIENT_HEADER]: "dashboard", ...init?.headers },
   });
   // A wrong password is just a failed login; any other 401 means the session is gone.
   if (resp.status === 401 && path !== "/auth/login") notifyUnauthorized();

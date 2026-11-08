@@ -82,9 +82,12 @@ async def wait_for(ws: Any, robot: str, marker: str, where: str) -> None:
             while True:
                 m = json.loads(await ws.recv())
                 d = m.get("data") or {}
-                if m.get("type") == "robot" and d.get("id") == robot:
-                    if d.get("software_version") == marker:
-                        return
+                if (
+                    m.get("type") == "robot"
+                    and d.get("id") == robot
+                    and d.get("software_version") == marker
+                ):
+                    return
     except TimeoutError:
         raise CheckFailed(f"{where}: no update for {robot} ({marker}) in {TIMEOUT_S}s") from None
 
