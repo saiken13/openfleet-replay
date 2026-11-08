@@ -124,7 +124,7 @@
 - Docker Compose: Postgres + backend + nginx frontend + simulator
 - Screenshots taken of the fleet, incident and replay pages
 
-CI jobs: backend, simulator, frontend, edge (C++: sanitizers + aarch64 cross under qemu), edge-agent-e2e, collector, ros2-collector-e2e, `e2e-regression-check` (threshold check, the re-detection gate, and the telemetry-stall replay check) and `e2e-multi-replica`.
+CI jobs: backend, simulator, frontend, edge (C++: sanitizers + aarch64 cross under qemu), edge-agent-e2e (3 parallel matrix jobs: agent, device gateway, firmware; needs only `backend`), collector, ros2-collector-e2e, `e2e-regression-check` (threshold check, the re-detection gate, and the telemetry-stall replay check) and `e2e-multi-replica`.
 
 ## Completed
 - **Backend** (`backend/app/`):

@@ -125,9 +125,19 @@ jobs:
   # SIGTERM ends the run ABORTED. Then the device gateway against the simulated MCU: a
   # stopped sensor, resets, a corrupted link, silence, a failed task, reconnects.
   # Simulated load and a simulated device on a CI VM, not robot hardware.
+  # The three e2e scripts wait in real time (outage, load, hysteresis, reset hold), so they
+  # run as parallel jobs. They build their own images, so they don't wait for `edge` or
+  # `firmware` either: the job takes as long as its slowest script, not the sum.
   edge-agent-e2e:
     runs-on: ubuntu-latest
-    needs: [backend, edge, firmware]
+    needs: [backend]
+    strategy:
+      fail-fast: false
+      matrix:
+        script: [edge/e2e/e2e.py, edge/e2e/device_e2e.py, firmware/tests/firmware_e2e.py]
+    name: edge-agent-e2e (${{ matrix.script }})
+    env:
+      PYTHONUNBUFFERED: "1"  # stage lines get real timestamps in the log
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -135,9 +145,7 @@ jobs:
           python-version: "3.12"
       - run: pip install httpx ruff
       - run: ruff check edge firmware && ruff format --check edge firmware
-      - run: python edge/e2e/e2e.py
-      - run: python edge/e2e/device_e2e.py
-      - run: python firmware/tests/firmware_e2e.py
+      - run: python ${{ matrix.script }}
       - if: failure()
         run: docker compose --profile edge --profile firmware logs edge-agent device-sim renode backend
 
