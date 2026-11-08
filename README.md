@@ -1,15 +1,36 @@
 # OpenFleet Replay
 
-**Observability, incident debugging, and replay for ROS 2 robot fleets.**
+[![CI](https://github.com/saiken13/openfleet-replay/actions/workflows/ci.yml/badge.svg)](https://github.com/saiken13/openfleet-replay/actions/workflows/ci.yml)
+[![Nightly](https://github.com/saiken13/openfleet-replay/actions/workflows/nightly.yml/badge.svg)](https://github.com/saiken13/openfleet-replay/actions/workflows/nightly.yml)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-When a robot fails in production, engineers need to answer these questions:
-- What happened?
-- Which node or topic failed first?
-- What changed in the seconds before?
-- Which software version was running?
-- Does the next version fix it or break something else?
+**Observability, incident debugging and replay for robot fleets, from the microcontroller to the dashboard.**
 
-OpenFleet Replay collects robot telemetry and tracks the health of ROS topics and nodes. It detects failures and opens deduplicated incidents, each with a timeline of what led up to it. You can **replay** a recorded run on the same dashboard used for live data, or **compare** two runs across software versions, either in the UI or as a CI gate.
+When a robot fails in production, engineers need to know what happened, which node or sensor failed first, what changed in the seconds before, which software version was running, and whether the next version fixes it. OpenFleet Replay collects telemetry from ROS 2 robots, Linux robot computers and their microcontrollers; detects failures and opens deduplicated incidents with a timeline; and lets you **replay** any recorded run on the same dashboard used for live data, **re-run new detection rules** over old runs, or **gate CI** on a regression.
+
+![Fleet dashboard: live robot health, sites, open incidents](docs/images/fleet.png)
+
+| Incident with its lead-up timeline | Replaying a recorded run | Sign in with Google |
+|---|---|---|
+| ![Incident page](docs/images/incident.png) | ![Run replay](docs/images/replay.png) | ![Login page](docs/images/login.png) |
+
+## Highlights
+
+- **Full-stack platform:** FastAPI + PostgreSQL backend (modular monolith), React/TypeScript dashboard with live WebSocket updates, and a CLI. It runs as several replicas behind a load balancer: Redis pub/sub fan-out, and a Postgres advisory lock so only one replica runs the liveness sweeper.
+- **Detection and incidents:** pure, unit-tested rules (topic rate, node health, heartbeat, CPU, memory, battery). Incidents are deduplicated by a partial unique index, escalate in place, and auto-resolve with hysteresis.
+- **Replay and re-detection:** scrub through any recorded run at 1×–16×. Or run the *current* rules over an old run to see which failures they'd still catch, miss or newly flag, as a UI panel or a CI gate (`openfleet redetect --fail-on-missed`).
+- **ROS 2:** a collector measures real topic rates, node liveness, `/rosout` and `/diagnostics` on the robot, and buffers through outages. It's tested end to end on ROS 2 Jazzy in CI.
+- **Embedded, without hardware:**
+  - a **C++20 edge agent** (threads, bounded queue, `/proc` sampling, a hardened systemd unit);
+  - a **binary device protocol** (COBS + CRC-16, C11, fuzzed with libFuzzer);
+  - **FreeRTOS firmware** on an emulated STM32F4 (Renode) with a supervised watchdog;
+  - a **ROS 2 bridge** (rclcpp) that republishes microcontrollers as ROS topics and `/diagnostics`.
+
+  Builds are tested with ASan, UBSan and TSan, cross-compiled to aarch64, and the agent is booted as a real systemd service on Debian arm64 in QEMU.
+- **Security and multi-tenancy:** per-robot API keys; users with roles; sign in with **Google** (OIDC code flow + PKCE); sliding sessions; login throttling; a triage audit log; and **sites**, where a user scoped to one site gets a 404 for anything else.
+- **Testing:** 450+ automated tests (backend 279, C/C++ 109, collector 28, frontend 17, simulator 15, Renode 8), more than 10 end-to-end suites against the real Docker stack in CI, and a nightly tier with fault-injection scenarios, fuzzing and benchmarks. 39 design decisions are recorded in [docs/DECISIONS.md](docs/DECISIONS.md).
+
+**Tech:** Python 3.12 · FastAPI · SQLAlchemy 2 (async) · PostgreSQL · Alembic · Redis · React · TypeScript · Vite · Tailwind · C++20 · C11 · CMake · GoogleTest · FreeRTOS · Renode · ROS 2 Jazzy (rclpy, rclcpp) · QEMU · systemd · Docker Compose · GitHub Actions
 
 ## What it does
 
@@ -105,8 +126,10 @@ A C++20 edge agent, a binary device protocol and FreeRTOS firmware on an emulate
 
 - **Phase 0 (done):** the dev container (`scripts/edge-dev.sh`), CMake presets with sanitizers and an aarch64 cross-compile tested under QEMU in CI, and a Renode STM32F4 smoke test (`firmware/renode/smoke.sh`).
 - **Phase 1 (done):** `openfleet-edge-agent`, a C++20 agent for Linux robot computers without ROS. It reports CPU, memory, link latency, watched processes and its own health as robot `edge-01`. It buffers through outages with the collector's delivery contract, and ends its run on SIGTERM. Try it: `docker compose --profile edge up -d --build`, then `python edge/e2e/e2e.py`.
-- **Phase 2 (done):** the [device protocol](docs/PROTOCOL.md): COBS + CRC-16 frames from a C11 library shared with the future firmware. The agent's gateway turns a microcontroller's sensors into topics, its tasks into nodes, and its resets into events. A simulated MCU with fault injection (`openfleet-device-sim`), two libFuzzer targets, and `python edge/e2e/device_e2e.py`.
+- **Phase 2 (done):** the [device protocol](docs/PROTOCOL.md): COBS + CRC-16 frames from a C11 library shared with the firmware. The agent's gateway turns a microcontroller's sensors into topics, its tasks into nodes, and its resets into events. A simulated MCU with fault injection (`openfleet-device-sim`), two libFuzzer targets, and `python edge/e2e/device_e2e.py`.
 - **Phase 3 (done):** [FreeRTOS firmware](docs/FIRMWARE.md) for an STM32F407, run on Renode's emulated STM32F4 (no board). It has sensor, comms, health and watchdog tasks. A stalled task causes a watchdog reset, which OpenFleet shows with its cause and as an incident that resolves. Try it: `docker compose --profile edge --profile firmware up -d --build`, then `python firmware/tests/firmware_e2e.py`.
+- **ROS 2 bridge (done):** `openfleet-ros-bridge` (rclcpp, `edge/ros/`) republishes a microcontroller into ROS 2 (readings as topics, health on `/diagnostics`, logs on `/rosout`), so a ROS robot's own collector reports it. `python edge/ros/e2e.py`.
+- **Full system (done):** the agent as a real systemd service on Debian 13 arm64 in `qemu-system-aarch64`: boot, crash restart, reboot and poweroff, plus its hardening (`systemd-analyze security` 1.2). `python edge/qemu/qemu_e2e.py`.
 - **Phase 4 (done):** a [regression tier and benchmarks](docs/BENCHMARKS.md). YAML scenarios inject faults into the compose stack and measure how long OpenFleet takes to show them (`python edge/e2e/run_scenarios.py`). A Robot Framework suite runs the firmware on Renode in emulated time, and micro-benchmarks cover the protocol and gateway. A nightly workflow puts it all in one report, with every figure labelled native, qemu-user or Renode.
 
 See [edge/README.md](edge/README.md).
@@ -159,10 +182,24 @@ To check a rule or threshold change against recorded failures instead, use `open
 
 ```mermaid
 flowchart LR
-    SIM["Simulator / ROS 2 collector"] -- "HTTP batches (~1/s)" --> API["FastAPI backend"]
+    subgraph Robot["On the robot"]
+        MCU["Microcontroller<br/>FreeRTOS (Renode STM32F4)"]
+        EDGE["C++ edge agent<br/>(Linux, no ROS)"]
+        BRIDGE["ROS 2 bridge"]
+        COL["ROS 2 collector"]
+    end
+    SIM["Simulator"]
+    MCU -- "COBS + CRC frames<br/>UART / TCP" --> EDGE
+    MCU -- "same frames" --> BRIDGE
+    BRIDGE -- "topics, /diagnostics, /rosout" --> COL
+    EDGE -- "HTTP batches (~1/s)" --> API["FastAPI backend<br/>(1..n replicas)"]
+    COL -- "HTTP batches" --> API
+    SIM -- "HTTP batches" --> API
     API --> PG[("PostgreSQL")]
+    API <-->|pub/sub| RD[("Redis")]
     API -- "WebSocket" --> UI["React dashboard"]
-    CLI["openfleet CLI"] --> API
+    CLI["openfleet CLI / CI gate"] --> API
+    UI -. "Sign in with Google (OIDC)" .-> API
 ```
 
 A single backend process (a modular monolith) contains:
@@ -208,19 +245,20 @@ npm test && npm run typecheck
 | Path | Contents |
 |---|---|
 | `backend/app/` | FastAPI app: `api/` (routers), `services/`, `repositories/` (SQL), `detection/` (pure rules), `realtime/` (hub), `workers/` (sweeper) |
-| `backend/openfleet_cli/` | `openfleet check` regression CLI (thin HTTP client), `openfleet keys` and `openfleet users` (credentials, direct DB) |
+| `backend/openfleet_cli/` | `openfleet check` / `redetect` (thin HTTP client); `openfleet keys`, `users`, `sites`, `retention` (direct DB) |
 | `backend/alembic/` | Migrations (CI runs `alembic check` so models and migrations can't drift) |
 | `collector/` | ROS 2 collector (runs on the robot) + ROS 2 end-to-end test |
+| `edge/` | C++20 edge agent and device gateway, `ros/` (ROS 2 bridge), `qemu/` (full-system e2e), `e2e/` (scenarios), `bench/` |
+| `protocol/` | The device protocol: a C11 library shared by the gateway and the firmware |
+| `firmware/` | FreeRTOS firmware for an STM32F407, run on Renode, with Robot Framework tests |
 | `simulator/` | Simulated robots + YAML failure scenarios (public API only) |
 | `frontend/` | React + TypeScript + Vite + Tailwind dashboard |
 | `examples/` | Example regression config; public demo robot keys and users |
-| `docs/` | Architecture, decisions, flows, constraints, bugs |
+| `docs/` | Architecture, 39 design decisions, request flows, protocol, firmware, benchmarks, bugs |
 
 ## Status and limits
 
-This is an MVP. It's single-process by design. The known scaling limits and their evolution paths are listed in [ARCHITECTURE §10](docs/ARCHITECTURE.md). These aren't built yet:
-- SSO/OIDC and multi-tenancy (built-in users, roles and robot keys are done)
-- rosbag/MCAP recordings
+A portfolio-scale system built to production habits: every feature is tested end to end against the real stack, and every design choice is written down. It runs as one process or several replicas. The known scaling limits and their evolution paths (time-series partitioning, detection behind a queue, object storage) are in [ARCHITECTURE §10](docs/ARCHITECTURE.md). Not built: rosbag/MCAP recordings; real robot hardware (embedded work runs on emulators and simulators, and every figure says which).
 
 ## License
 
