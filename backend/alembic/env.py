@@ -1,7 +1,7 @@
 import asyncio
 from logging.config import fileConfig
 
-from sqlalchemy import pool
+from sqlalchemy import pool, text
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import create_async_engine
 
@@ -32,9 +32,23 @@ def run_migrations_offline() -> None:
         context.run_migrations()
 
 
+# Every backend replica runs `alembic upgrade head` at startup (Dockerfile CMD). Without a
+# lock, replicas starting together on a fresh database race to create alembic_version and the
+# loser exits (BUG-006). A transaction-level advisory lock serializes them: the next one waits,
+# then reads the version the first one committed and has nothing left to do. Its own key,
+# distinct from the sweeper's (app/workers/lock.py).
+MIGRATION_LOCK_KEY = 0x0F1EE7_A1E8
+
+
 def do_run_migrations(connection: Connection) -> None:
     context.configure(connection=connection, target_metadata=target_metadata)
     with context.begin_transaction():
+        # Inside alembic's transaction, before it reads the current version: released at
+        # commit or rollback, so a crashed migration can't leave it held.
+        if connection.dialect.name == "postgresql":
+            connection.execute(
+                text("SELECT pg_advisory_xact_lock(:key)"), {"key": MIGRATION_LOCK_KEY}
+            )
         context.run_migrations()
 
 

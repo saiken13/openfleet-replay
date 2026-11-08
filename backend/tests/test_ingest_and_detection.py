@@ -251,6 +251,46 @@ async def test_robot_silent_during_run_opens_heartbeat_incident_then_aborts_run(
     assert (await robot(client))["status"] == "ONLINE"
 
 
+async def test_restarted_backend_does_not_blame_robots_for_its_own_outage(
+    client: httpx.AsyncClient, clock: Clock, sweeper
+) -> None:
+    """BUG-007: the backend was down for 90 s while the robot buffered. On restart, silence
+    the backend wasn't there to hear is not the robot's: no OFFLINE, no heartbeat_missing,
+    no aborted run, until the backend has listened for the whole timeout."""
+    run_id = await setup_run(client)
+    await ingest(client, run_id, batch(0))
+    restart = clock.now + _s(90)
+    sweeper.listening_since = restart
+
+    result = await sweeper.tick(restart + _s(2))  # the first ticks after the restart
+    assert result.marked == [] and result.aborted_runs == []
+    assert await incidents(client, status="open") == []
+    assert (await robot(client))["status"] != "OFFLINE"
+
+    # The robot's buffered batches arrive within the grace: nothing was ever wrong.
+    clock.advance(95)
+    await ingest(client, run_id, batch(1))
+    await sweeper.tick(restart + _s(11))
+    assert await incidents(client, status="open") == []
+    assert (await client.get(f"/api/v1/runs/{run_id}")).json()["status"] == "RUNNING"
+
+
+async def test_robot_that_died_during_the_outage_is_caught_after_the_grace(
+    client: httpx.AsyncClient, clock: Clock, sweeper
+) -> None:
+    run_id = await setup_run(client)
+    await ingest(client, run_id, batch(0))
+    restart = clock.now + _s(90)
+    sweeper.listening_since = restart
+
+    assert (await sweeper.tick(restart + _s(9))).marked == []
+    assert (await sweeper.tick(restart + _s(10))).marked == ["robot-01"]  # one timeout heard
+    assert [i["dedup_key"] for i in await incidents(client, status="open")] == ["heartbeat_missing"]
+    # Its run is abandoned only after RUN_ABANDON_AFTER_S of silence the backend heard.
+    assert (await sweeper.tick(restart + _s(59))).aborted_runs == []
+    assert (await sweeper.tick(restart + _s(60))).aborted_runs == [run_id]
+
+
 async def test_offline_robot_incidents_are_not_auto_resolved(
     client: httpx.AsyncClient, clock: Clock, sweeper
 ) -> None:

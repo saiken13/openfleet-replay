@@ -44,3 +44,75 @@ def test_migrations_round_trip(migrated_database: str) -> None:
         "topic_states",
         "node_states",
     } <= _table_names(migrated_database)
+
+
+def test_concurrent_upgrades_on_a_fresh_database_all_succeed() -> None:
+    """Replicas each run `alembic upgrade head` at startup (Dockerfile CMD). On a fresh
+    database they used to race to create alembic_version and the loser exited (BUG-006);
+    env.py now serializes them with an advisory lock. Real processes, as in production."""
+    import os
+    import subprocess
+    import sys
+
+    import asyncpg
+    from sqlalchemy.engine import make_url
+
+    from tests.conftest import BACKEND_DIR, TEST_DATABASE_URL
+
+    url = make_url(TEST_DATABASE_URL).set(database="openfleet_test_migrate_race")
+
+    async def admin(sql: str) -> None:
+        conn = await asyncpg.connect(
+            user=url.username,
+            password=url.password,
+            host=url.host,
+            port=url.port,
+            database="postgres",
+        )
+        try:
+            await conn.execute(sql)
+        finally:
+            await conn.close()
+
+    name = url.database
+    run_in_fresh_thread(asyncio.run, admin(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)'))
+    run_in_fresh_thread(asyncio.run, admin(f'CREATE DATABASE "{name}"'))
+    try:
+        env = {**os.environ, "OPENFLEET_DATABASE_URL": url.render_as_string(hide_password=False)}
+        procs = [
+            subprocess.Popen(
+                [sys.executable, "-m", "alembic", "upgrade", "head"],
+                cwd=BACKEND_DIR,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+            for _ in range(6)
+        ]
+        results = [(p.wait(timeout=120), p.stdout.read() if p.stdout else "") for p in procs]
+        failed = [out[-1500:] for code, out in results if code != 0]
+        assert not failed, failed[0]
+
+        head = ScriptDirectory.from_config(alembic_config()).get_current_head()
+        versions: list[str] = []
+
+        async def current() -> None:
+            conn = await asyncpg.connect(
+                user=url.username,
+                password=url.password,
+                host=url.host,
+                port=url.port,
+                database=name,
+            )
+            try:
+                versions.extend(
+                    r[0] for r in await conn.fetch("SELECT version_num FROM alembic_version")
+                )
+            finally:
+                await conn.close()
+
+        run_in_fresh_thread(asyncio.run, current())
+        assert versions == [head]
+    finally:
+        run_in_fresh_thread(asyncio.run, admin(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)'))

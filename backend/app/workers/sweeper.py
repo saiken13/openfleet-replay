@@ -35,13 +35,21 @@ class Sweeper:
         settings: Settings,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         lock: AdvisoryLock | None = None,
+        listening_since: datetime | None = None,
     ) -> None:
-        """`lock=None` sweeps unconditionally (single process / tests); the app passes one."""
+        """`lock=None` sweeps unconditionally (single process / tests); the app passes one.
+
+        `listening_since` (BUG-007): when this process started receiving. Silence is judged
+        only once the process has listened for the whole timeout, so a backend that was
+        down doesn't blame robots for the outage: they were buffering, not silent. A robot
+        that really died is still caught, at most one timeout later than otherwise. None
+        disables the grace (tests that drive `now` themselves)."""
         self.sessionmaker = sessionmaker
         self.hub = hub
         self.settings = settings
         self.clock = clock
         self.lock = lock
+        self.listening_since = listening_since
         self._next_retention: datetime | None = None  # per process; at most once per interval
 
     async def tick(self, now: datetime | None = None) -> TickResult:
@@ -54,11 +62,22 @@ class Sweeper:
             # Read the clock after acquiring: waiting on the pool must not make `now` stale.
             return await self._sweep(now or self.clock())
 
+    def _heard_for(self, now: datetime, seconds: float) -> bool:
+        """Has this process been listening for at least `seconds`?"""
+        return self.listening_since is None or now - self.listening_since >= timedelta(
+            seconds=seconds
+        )
+
     async def _sweep(self, now: datetime) -> TickResult:
+        s = self.settings
+        marked: list[str] = []
+        aborted: list[str] = []
         async with self.sessionmaker() as session:
-            svc = LivenessService(session, self.hub, self.settings)
-            marked = await svc.mark_stale_offline(now)
-            aborted = await svc.abort_abandoned_runs(now)
+            svc = LivenessService(session, self.hub, s)
+            if self._heard_for(now, s.heartbeat_timeout_s):
+                marked = await svc.mark_stale_offline(now)
+            if self._heard_for(now, s.run_abandon_after_s):
+                aborted = await svc.abort_abandoned_runs(now)
         return TickResult(
             marked=marked, aborted_runs=aborted, compacted_runs=await self._retention(now)
         )

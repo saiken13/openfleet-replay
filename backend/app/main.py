@@ -4,6 +4,7 @@ import json
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -79,6 +80,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             app.state.hub,
             settings,
             lock=AdvisoryLock(app.state.engine),
+            listening_since=datetime.now(UTC),  # BUG-007: no blame for our own outage
         )
         app.state.bus = RedisBus(app.state.hub, settings.redis_url) if settings.redis_url else None
         if app.state.bus is not None:

@@ -21,13 +21,18 @@ from tests.helpers import T0, batch, ingest, register, start_run
 LOG = {"level": "WARN", "source": "lidar_driver", "message": "scan timeout"}
 
 
-async def recorded_run(client: httpx.AsyncClient, clock: Clock, robot: str = "robot-01") -> str:
+async def recorded_run(
+    client: httpx.AsyncClient, clock: Clock, robot: str = "robot-01", offset_s: float = 0
+) -> str:
     """20 batches with a degraded /scan (an incident), a log line per batch and a
-    heartbeat, then ended at T0 + 20 s."""
-    run_id = await start_run(client, robot)
+    heartbeat, then ended 20 s after it started (T0 + offset_s). Two runs on one robot need
+    different offsets: with equal started_at the latest run is decided by its random id
+    (#016), and the new run could be aborted as superseded by the finished one."""
+    start = T0 + timedelta(seconds=offset_s)
+    run_id = await start_run(client, robot, started_at=start)
     for seq in range(20):
         clock.advance(1)
-        ts = (T0 + timedelta(seconds=seq)).isoformat()
+        ts = (start + timedelta(seconds=seq)).isoformat()
         body = batch(seq, hz={"/scan": 4.0 if 5 <= seq < 12 else 15.0})
         body["logs"] = [{**LOG, "ts": ts}]
         await ingest(client, run_id, body)
@@ -35,7 +40,7 @@ async def recorded_run(client: httpx.AsyncClient, clock: Clock, robot: str = "ro
         assert hb.status_code == 204
     resp = await client.post(
         f"/api/v1/runs/{run_id}/end",
-        json={"status": "SUCCESS", "ended_at": (T0 + timedelta(seconds=20)).isoformat()},
+        json={"status": "SUCCESS", "ended_at": (start + timedelta(seconds=20)).isoformat()},
     )
     assert resp.status_code == 200, resp.text
     return run_id
@@ -57,7 +62,7 @@ async def test_compacting_keeps_summary_compare_and_incidents_but_drops_raw_rows
 ) -> None:
     await register(client)
     run_id = await recorded_run(client, clock)
-    base = await recorded_run(client, clock)
+    base = await recorded_run(client, clock, offset_s=30)
     before = await get(client, f"/api/v1/runs/{run_id}/summary")
     compare_before = await get(client, "/api/v1/runs/compare", base=base, candidate=run_id)
     incidents_before = await count(db_session, Incident, run_id)
