@@ -3,8 +3,10 @@ from typing import Annotated
 
 from fastapi import APIRouter, Query, Response, status
 
-from app.api.auth import UNAUTHORIZED, VIEWER, RobotAuth, require_robot
+from app.api.auth import UNAUTHORIZED, VIEWER, RobotAuth, Viewer, require_robot
 from app.api.deps import HubDep, NowDep, SessionDep, SettingsDep
+from app.api.scope import COMPARE_VIEWER, RUN_VIEWER, can_see, robot_site
+from app.domain.errors import NotFoundError
 from app.schemas.analysis import RunComparison, RunStream, RunSummary
 from app.schemas.redetect import RedetectRequest, RedetectResult
 from app.schemas.robot import ROBOT_ID_PATTERN
@@ -29,11 +31,14 @@ RUN_NOT_FOUND = {404: {"description": "Run not found"}}
 )
 async def list_runs(
     session: SessionDep,
+    user: Viewer,
     robot_id: Annotated[str | None, Query(pattern=ROBOT_ID_PATTERN)] = None,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
     cursor: Annotated[str | None, Query(max_length=200)] = None,
 ) -> RunPage:
-    page = await RunService(session).list_runs(robot_id, limit, cursor)
+    if robot_id is not None and not can_see(user, await robot_site(session, robot_id)):
+        raise NotFoundError(f"robot {robot_id!r} not found")  # as if it didn't exist (#039)
+    page = await RunService(session).list_runs(robot_id, limit, cursor, user.site_id)
     return RunPage(
         items=[RunRead.model_validate(r) for r in page.runs], next_cursor=page.next_cursor
     )
@@ -41,7 +46,7 @@ async def list_runs(
 
 @router.get(
     "/compare",
-    dependencies=[VIEWER],
+    dependencies=[COMPARE_VIEWER],
     response_model=RunComparison,
     responses=RUN_NOT_FOUND,
     summary="Compare two runs (candidate - base)",
@@ -126,14 +131,14 @@ async def ingest_telemetry(
     return IngestResult(accepted=True, duplicate=not accepted)
 
 
-@router.get("/{run_id}", dependencies=[VIEWER], response_model=RunRead, responses=RUN_NOT_FOUND)
+@router.get("/{run_id}", dependencies=[RUN_VIEWER], response_model=RunRead, responses=RUN_NOT_FOUND)
 async def get_run(run_id: uuid.UUID, session: SessionDep) -> RunRead:
     return RunRead.model_validate(await RunService(session).get(run_id))
 
 
 @router.get(
     "/{run_id}/stream",
-    dependencies=[VIEWER],
+    dependencies=[RUN_VIEWER],
     response_model=RunStream,
     responses=RUN_NOT_FOUND,
     summary="Replay: the run's samples, topic samples and events as one ordered stream",
@@ -148,7 +153,10 @@ async def run_stream(
 
 
 @router.get(
-    "/{run_id}/summary", dependencies=[VIEWER], response_model=RunSummary, responses=RUN_NOT_FOUND
+    "/{run_id}/summary",
+    dependencies=[RUN_VIEWER],
+    response_model=RunSummary,
+    responses=RUN_NOT_FOUND,
 )
 async def run_summary(run_id: uuid.UUID, session: SessionDep) -> RunSummary:
     return await AnalysisService(session).summary(run_id)
@@ -156,7 +164,7 @@ async def run_summary(run_id: uuid.UUID, session: SessionDep) -> RunSummary:
 
 @router.post(
     "/{run_id}/redetect",
-    dependencies=[VIEWER],
+    dependencies=[RUN_VIEWER],
     response_model=RedetectResult,
     responses={**RUN_NOT_FOUND, 422: {"description": "Invalid thresholds, or run too long"}},
     summary="Re-detection replay: run the current rules (or overridden thresholds) over a "

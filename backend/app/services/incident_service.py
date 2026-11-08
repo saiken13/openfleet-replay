@@ -43,9 +43,15 @@ class IncidentService(Service):
         run_id: uuid.UUID | None,
         severity: Severity | None,
         limit: int,
+        site_id: str | None = None,
     ) -> list[Incident]:
         return await self.incidents.search(
-            status=status, robot_id=robot_id, run_id=run_id, severity=severity, limit=limit
+            status=status,
+            robot_id=robot_id,
+            run_id=run_id,
+            severity=severity,
+            limit=limit,
+            site_id=site_id,
         )
 
     async def update_status(

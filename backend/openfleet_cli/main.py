@@ -24,7 +24,7 @@ import httpx
 import yaml
 from pydantic import ValidationError
 
-from openfleet_cli import keys, retention, users
+from openfleet_cli import keys, retention, sites, users
 from openfleet_cli.checks import CheckConfig, CheckResult, evaluate
 
 EXIT_OK, EXIT_FAILED, EXIT_ERROR = 0, 1, 2
@@ -186,6 +186,7 @@ def build_parser() -> argparse.ArgumentParser:
     r.set_defaults(func=cmd_redetect)
     keys.add_parser(sub, _default_database_url()).set_defaults(func=cmd_keys)
     users.add_parser(sub, _default_database_url()).set_defaults(func=cmd_users)
+    sites.add_parser(sub, _default_database_url()).set_defaults(func=cmd_sites)
     retention.add_parser(sub, _default_database_url(), _default_retention_days()).set_defaults(
         func=cmd_retention
     )
@@ -214,6 +215,13 @@ def cmd_retention(args: argparse.Namespace, transport: httpx.BaseTransport | Non
 def cmd_users(args: argparse.Namespace, transport: httpx.BaseTransport | None = None) -> int:
     try:
         return args.users_func(args)
+    except keys.KeysError as exc:
+        raise CliError(str(exc)) from exc
+
+
+def cmd_sites(args: argparse.Namespace, transport: httpx.BaseTransport | None = None) -> int:
+    try:
+        return args.sites_func(args)
     except keys.KeysError as exc:
         raise CliError(str(exc)) from exc
 

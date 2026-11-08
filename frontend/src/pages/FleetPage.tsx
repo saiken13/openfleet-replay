@@ -11,6 +11,7 @@ export function FleetPage() {
   const [robots, setRobots] = useState<Record<string, Robot>>({});
   const [incidents, setIncidents] = useState<Record<string, Incident>>({});
   const [error, setError] = useState<string | null>(null);
+  const [site, setSite] = useState<string>(""); // "" = every site the user can see
   const now = useNow();
 
   const load = useCallback(async () => {
@@ -38,8 +39,15 @@ export function FleetPage() {
   }, []);
   useConnection(useLiveSocket("/ws/fleet", onMessage, load));
 
-  const list = Object.values(robots).sort((a, b) => a.id.localeCompare(b.id));
-  const open = Object.values(incidents).sort((a, b) => b.started_at.localeCompare(a.started_at));
+  // Sites (DECISIONS #039): the server only sends this user's sites; with more than one, a
+  // filter and a badge per robot. One site looks exactly as before.
+  const all = Object.values(robots);
+  const sites = [...new Set(all.map((r) => r.site_id))].sort();
+  const inSite = (robotId: string) => !site || robots[robotId]?.site_id === site;
+  const list = all.filter((r) => inSite(r.id)).sort((a, b) => a.id.localeCompare(b.id));
+  const open = Object.values(incidents)
+    .filter((i) => inSite(i.robot_id))
+    .sort((a, b) => b.started_at.localeCompare(a.started_at));
   const counts = list.reduce<Record<string, number>>((acc, r) => ({ ...acc, [r.status]: (acc[r.status] ?? 0) + 1 }), {});
 
   return (
@@ -51,6 +59,23 @@ export function FleetPage() {
             {list.length} robots · {(["ONLINE", "DEGRADED", "ERROR", "OFFLINE"] as const).map((s) => `${counts[s] ?? 0} ${s.toLowerCase()}`).join(" · ")}
           </p>
         </div>
+        {sites.length > 1 && (
+          <label className="flex items-center gap-2 text-sm text-slate-400">
+            Site
+            <select
+              className="rounded-md border border-slate-700 bg-slate-950 px-2 py-1 text-slate-200"
+              value={site}
+              onChange={(e) => setSite(e.target.value)}
+            >
+              <option value="">all sites</option>
+              {sites.map((s) => (
+                <option key={s} value={s}>
+                  {s}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
       </div>
       {error && <div className="card border-rose-500/40 px-4 py-3 text-sm text-rose-300">{error}</div>}
 
@@ -72,6 +97,7 @@ export function FleetPage() {
             </div>
             <div className="mt-1 font-mono text-xs text-slate-500">
               {r.id} · v{r.software_version ?? "?"}
+              {sites.length > 1 && <span className="ml-1 rounded bg-slate-800 px-1.5 py-0.5 text-slate-400">{r.site_id}</span>}
             </div>
             <div className="mt-3 space-y-1.5">
               <Bar label="CPU" v={r.cpu_pct} warn={90} />

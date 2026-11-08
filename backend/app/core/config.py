@@ -41,6 +41,7 @@ class Settings(BaseSettings):
     oidc_redirect_url: str | None = None  # https://HOST/api/v1/auth/oidc/callback
     oidc_allowed_domains: list[str] = []
     oidc_default_role: str = "VIEWER"
+    oidc_default_site: str | None = None  # the site those new users see; unset = every site
     oidc_provider_name: str = "Google"  # the login button's label
     ws_reauth_interval_s: float = Field(30.0, gt=0)  # live sockets re-check their session
     # Login throttling (DECISIONS #027): attempts per fixed window, per username and per

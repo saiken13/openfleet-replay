@@ -34,16 +34,36 @@ from app.domain.enums import (
     UserRole,
 )
 
+DEFAULT_SITE = "default"
+
+
+class Site(Base):
+    """A tenant: a site or a team (DECISIONS #039). Robots belong to exactly one; a user is
+    scoped to one, or (site_id NULL) sees every site."""
+
+    __tablename__ = "sites"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)  # slug, e.g. "warehouse-a"
+    name: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
 
 class Robot(Base):
     __tablename__ = "robots"
-    __table_args__ = (enum_check("status", RobotStatus, "status"),)
+    __table_args__ = (
+        enum_check("status", RobotStatus, "status"),
+        Index("ix_robots_site_id", "site_id"),
+    )
 
     # Identity: written only on registration.
     id: Mapped[str] = mapped_column(Text, primary_key=True)
     name: Mapped[str] = mapped_column(Text)
     model: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    # New robots land in the default site; `openfleet sites assign` moves them (#039).
+    site_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("sites.id"), server_default=text(f"'{DEFAULT_SITE}'")
+    )
 
     # Current state: written only by heartbeat / ingest / sweeper services.
     status: Mapped[str] = mapped_column(Text, server_default=text(f"'{RobotStatus.OFFLINE}'"))
@@ -255,6 +275,8 @@ class User(Base):
     # Sign-in provider identity, "<issuer>|<sub>" (DECISIONS #038). Set on the first OIDC
     # sign-in; the account then only ever matches that identity.
     oidc_subject: Mapped[str | None] = mapped_column(Text, unique=True)
+    # The one site this user sees; NULL = every site (DECISIONS #039).
+    site_id: Mapped[str | None] = mapped_column(Text, ForeignKey("sites.id"))
 
 
 class UserToken(Base):

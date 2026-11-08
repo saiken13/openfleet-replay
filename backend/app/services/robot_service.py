@@ -53,8 +53,8 @@ class RobotService(Service):
             raise NotFoundError(f"robot {robot_id!r} not found")
         return robot
 
-    async def list_all(self) -> list[Robot]:
-        return await self.robots.list_all()
+    async def list_all(self, site_id: str | None = None) -> list[Robot]:
+        return await self.robots.list_all(site_id)
 
     async def topics(self, robot_id: str) -> list[TopicState]:
         await self.get(robot_id)

@@ -130,7 +130,11 @@ async def test_login_sets_a_strict_httponly_cookie_and_me_works(
 ) -> None:
     await make_user(db_session, "Alice")  # usernames are case-insensitive
     resp = await login(client, "ALICE")
-    assert resp.status_code == 200 and resp.json() == {"username": "alice", "role": "VIEWER"}
+    assert resp.status_code == 200 and resp.json() == {
+        "username": "alice",
+        "role": "VIEWER",
+        "site_id": None,
+    }
     cookie = resp.headers["set-cookie"].lower()
     assert "httponly" in cookie and "samesite=strict" in cookie and "path=/api" in cookie
     assert "ofs_" not in resp.text  # the session token never appears in a body

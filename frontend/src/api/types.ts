@@ -12,6 +12,7 @@ export interface Robot {
   id: string;
   name: string;
   model: string | null;
+  site_id: string; // DECISIONS #039
   created_at: string;
   status: RobotStatus;
   software_version: string | null;

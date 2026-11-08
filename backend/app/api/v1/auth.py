@@ -41,6 +41,7 @@ class UserRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     username: str
     role: UserRole
+    site_id: str | None = None  # the one site this user sees; None = every site (#039)
 
 
 class OidcProvider(BaseModel):
@@ -221,6 +222,7 @@ async def oidc_callback(
             timedelta(seconds=settings.session_max_s),
             settings.oidc_allowed_domains,
             UserRole(settings.oidc_default_role.upper()),
+            settings.oidc_default_site,
         )
     except OidcError as exc:
         log.warning("OIDC sign-in refused: %s", exc)

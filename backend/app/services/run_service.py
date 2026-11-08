@@ -147,13 +147,13 @@ class RunService(Service):
         return run
 
     async def list_runs(
-        self, robot_id: str | None, limit: int, cursor: str | None
+        self, robot_id: str | None, limit: int, cursor: str | None, site_id: str | None = None
     ) -> RunPageResult:
         if robot_id is not None and await self.robots.get(robot_id) is None:
             raise NotFoundError(f"robot {robot_id!r} not found")
         before = _decode_cursor(cursor) if cursor else None
         # Fetch one extra row to learn whether another page exists.
-        rows = await self.runs.list_runs(robot_id, limit + 1, before)
+        rows = await self.runs.list_runs(robot_id, limit + 1, before, site_id)
         page, more = rows[:limit], len(rows) > limit
         next_cursor = _encode_cursor(page[-1]) if more and page else None
         return RunPageResult(runs=page, next_cursor=next_cursor)

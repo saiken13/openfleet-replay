@@ -5,6 +5,7 @@ export type UserRole = "VIEWER" | "OPERATOR";
 export interface User {
   username: string;
   role: UserRole;
+  site_id?: string | null; // the one site this user sees; null = every site (#039)
 }
 
 /** Sent on every API request. Cookie-authenticated writes (and login) are refused without

@@ -54,8 +54,11 @@ class RobotRepository:
         )
         return (await self.session.scalars(stmt)).one_or_none()
 
-    async def list_all(self) -> list[Robot]:
-        return list(await self.session.scalars(select(Robot).order_by(Robot.id)))
+    async def list_all(self, site_id: str | None = None) -> list[Robot]:
+        stmt = select(Robot).order_by(Robot.id)
+        if site_id is not None:
+            stmt = stmt.where(Robot.site_id == site_id)
+        return list(await self.session.scalars(stmt))
 
     async def stale_not_offline(self, cutoff: datetime) -> list[str]:
         """Robots the server still considers up whose last contact is older than cutoff."""

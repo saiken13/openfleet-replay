@@ -3,8 +3,9 @@ from typing import Annotated, Literal
 
 from fastapi import APIRouter, Query
 
-from app.api.auth import OPERATOR_ONLY, VIEWER, Operator
+from app.api.auth import OPERATOR_ONLY, VIEWER, Operator, Viewer
 from app.api.deps import HubDep, NowDep, SessionDep, SettingsDep
+from app.api.scope import INCIDENT_VIEWER
 from app.domain.enums import Severity
 from app.schemas.incident import IncidentRead, IncidentTimeline, IncidentUpdate
 from app.schemas.robot import ROBOT_ID_PATTERN
@@ -24,6 +25,7 @@ NOT_FOUND = {404: {"description": "Incident not found"}}
 async def list_incidents(
     session: SessionDep,
     settings: SettingsDep,
+    user: Viewer,
     status: Literal["open", "resolved", "all"] = "all",
     robot_id: Annotated[str | None, Query(pattern=ROBOT_ID_PATTERN)] = None,
     run_id: uuid.UUID | None = None,
@@ -31,13 +33,16 @@ async def list_incidents(
     limit: Annotated[int, Query(ge=1, le=500)] = 100,
 ) -> list[IncidentRead]:
     rows = await IncidentService(session, None, settings).search(
-        status, robot_id, run_id, severity, limit
+        status, robot_id, run_id, severity, limit, user.site_id
     )
     return [IncidentRead.model_validate(i) for i in rows]
 
 
 @router.get(
-    "/{incident_id}", dependencies=[VIEWER], response_model=IncidentRead, responses=NOT_FOUND
+    "/{incident_id}",
+    dependencies=[INCIDENT_VIEWER],
+    response_model=IncidentRead,
+    responses=NOT_FOUND,
 )
 async def get_incident(
     incident_id: uuid.UUID, session: SessionDep, settings: SettingsDep
@@ -49,6 +54,7 @@ async def get_incident(
 
 @router.patch(
     "/{incident_id}",
+    dependencies=[INCIDENT_VIEWER],  # another site's incident is 404, not 403 (#039)
     response_model=IncidentRead,
     responses={**NOT_FOUND, 409: {"description": "Incident already resolved"}, **OPERATOR_ONLY},
     summary="Triage: mark INVESTIGATING or RESOLVED (operator role)",
@@ -70,7 +76,7 @@ async def update_incident(
 
 @router.get(
     "/{incident_id}/timeline",
-    dependencies=[VIEWER],
+    dependencies=[INCIDENT_VIEWER],
     response_model=IncidentTimeline,
     responses=NOT_FOUND,
     summary="What led up to the incident: events + downsampled telemetry around it",

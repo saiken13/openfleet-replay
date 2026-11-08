@@ -37,6 +37,7 @@ function UserMenu() {
     <span className="flex items-center gap-2 text-xs text-slate-400">
       <span>
         {user.username} <span className="text-slate-500">· {user.role.toLowerCase()}</span>
+        {user.site_id && <span className="text-slate-500"> · {user.site_id}</span>}
       </span>
       <button className="rounded px-2 py-1 text-slate-400 hover:bg-slate-800 hover:text-slate-200" onClick={() => void logout()}>
         Sign out

@@ -27,6 +27,7 @@ class RobotRead(BaseModel):
     id: str
     name: str
     model: str | None
+    site_id: str
     created_at: datetime
     status: RobotStatus
     software_version: str | None

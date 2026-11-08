@@ -5,7 +5,7 @@ from sqlalchemy import and_, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import Run
+from app.db.models import Robot, Run
 from app.domain.enums import RunStatus
 
 
@@ -74,12 +74,15 @@ class RunRepository:
         robot_id: str | None,
         limit: int,
         before: tuple[datetime, uuid.UUID] | None = None,
+        site_id: str | None = None,
     ) -> list[Run]:
         """Newest first. Keyset pagination on (started_at, id), served by
         ix_runs_robot_id_started_at (per robot) or ix_runs_started_at (all)."""
         stmt = select(Run)
         if robot_id is not None:
             stmt = stmt.where(Run.robot_id == robot_id)
+        if site_id is not None:
+            stmt = stmt.where(Run.robot_id.in_(select(Robot.id).where(Robot.site_id == site_id)))
         if before is not None:
             started_at, run_id = before
             stmt = stmt.where(

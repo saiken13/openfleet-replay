@@ -6,7 +6,7 @@ from sqlalchemy import func, select, text
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import Incident
+from app.db.models import Incident, Robot
 from app.domain.enums import IncidentStatus, Severity
 
 
@@ -59,8 +59,13 @@ class IncidentRepository:
         run_id: uuid.UUID | None,
         severity: Severity | None,
         limit: int,
+        site_id: str | None = None,
     ) -> list[Incident]:
         stmt = select(Incident)
+        if site_id is not None:
+            stmt = stmt.where(
+                Incident.robot_id.in_(select(Robot.id).where(Robot.site_id == site_id))
+            )
         if status == "open":
             stmt = stmt.where(Incident.status != IncidentStatus.RESOLVED)
         elif status == "resolved":

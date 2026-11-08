@@ -126,6 +126,7 @@ class UserService:
         max_age: timedelta,
         allowed_domains: list[str],
         default_role: UserRole,
+        default_site: str | None = None,
     ) -> tuple[User, IssuedToken]:
         """A session for a verified provider identity (DECISIONS #038), or OidcError.
 
@@ -153,6 +154,8 @@ class UserService:
                 if user is None:  # created concurrently
                     user = await self.users.by_username(name)
                     assert user is not None
+                else:
+                    user.site_id = default_site  # DECISIONS #039
             else:
                 raise OidcError(f"{name} has no access; ask an administrator to add you")
             user.oidc_subject = identity.subject

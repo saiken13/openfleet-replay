@@ -185,7 +185,7 @@ async def test_allowed_domain_signs_in_and_creates_a_viewer(
     assert r.status_code == 302 and r.headers["location"] == "/"
     assert SESSION_COOKIE in r.cookies
     me = await sso.get("/api/v1/auth/me", auth=None)
-    assert me.json() == {"username": "ada@robots.example", "role": "VIEWER"}
+    assert me.json() == {"username": "ada@robots.example", "role": "VIEWER", "site_id": None}
     user = await UserService(db_session).get("ada@robots.example")
     assert user.oidc_subject == f"{ISSUER}|g-123"
     # The same identity again: the same account, no duplicate.

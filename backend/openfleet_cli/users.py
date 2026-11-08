@@ -17,6 +17,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from app.domain.enums import UserRole
+from app.services.site_service import SiteService
 from app.services.user_service import UserService
 from openfleet_cli.keys import KeysError, run_db
 
@@ -38,10 +39,14 @@ def _read_password(args: argparse.Namespace) -> str:
 
 def cmd_create(args: argparse.Namespace) -> int:
     password = None if args.sso else _read_password(args)
-    user = run_db(
-        args.database_url,
-        lambda s: UserService(s).create(args.username, password, _role(args.role)),
-    )
+
+    async def go(s):
+        user = await UserService(s).create(args.username, password, _role(args.role))
+        if args.site:
+            user = await SiteService(s).set_user_site(user.username, args.site)
+        return user
+
+    user = run_db(args.database_url, go)
     how = ", signs in with SSO only" if args.sso else ""
     print(f"created user {user.username!r} ({user.role.lower()}{how})")
     return 0
@@ -53,6 +58,7 @@ def cmd_list(args: argparse.Namespace) -> int:
         {
             "username": u.username,
             "role": u.role,
+            "site": u.site_id,
             "created_at": u.created_at.isoformat(),
             "disabled_at": u.disabled_at.isoformat() if u.disabled_at else None,
         }
@@ -64,7 +70,9 @@ def cmd_list(args: argparse.Namespace) -> int:
         print("no users")
     for r in rows if not args.json else []:
         state = "disabled" if r["disabled_at"] else "active"
-        print(f"{r['username']:<24} {r['role'].lower():<9} {state}")
+        print(
+            f"{r['username']:<24} {r['role'].lower():<9} {r['site'] or '(all sites)':<16} {state}"
+        )
     return 0
 
 
@@ -73,6 +81,15 @@ def cmd_set_role(args: argparse.Namespace) -> int:
         args.database_url, lambda s: UserService(s).set_role(args.username, _role(args.role))
     )
     print(f"{user.username!r} is now {user.role.lower()}")
+    return 0
+
+
+def cmd_set_site(args: argparse.Namespace) -> int:
+    site = None if args.all else args.site
+    if site is None and not args.all:
+        raise KeysError("give a SITE, or --all")
+    user = run_db(args.database_url, lambda s: SiteService(s).set_user_site(args.username, site))
+    print(f"{user.username!r} now sees {repr(site) if site else 'every site'}")
     return 0
 
 
@@ -170,6 +187,7 @@ def add_parser(sub: Any, default_database_url: str) -> argparse.ArgumentParser:
     c = usub.add_parser("create", help="create a user")
     c.add_argument("username")
     c.add_argument("--role", choices=ROLES, default="viewer")
+    c.add_argument("--site", help="the one site this user sees (default: every site)")
     c.add_argument(
         "--sso",
         action="store_true",
@@ -186,6 +204,12 @@ def add_parser(sub: Any, default_database_url: str) -> argparse.ArgumentParser:
     r.add_argument("username")
     r.add_argument("role", choices=ROLES)
     r.set_defaults(users_func=cmd_set_role)
+
+    ss = usub.add_parser("set-site", help="limit a user to one site, or --all (DECISIONS #039)")
+    ss.add_argument("username")
+    ss.add_argument("site", nargs="?")
+    ss.add_argument("--all", action="store_true", help="see every site")
+    ss.set_defaults(users_func=cmd_set_site)
 
     pw = usub.add_parser("passwd", help="set a user's password (signs out their sessions)")
     pw.add_argument("username")

@@ -2,8 +2,9 @@ from typing import Annotated
 
 from fastapi import APIRouter, Path, Query, Response, status
 
-from app.api.auth import UNAUTHORIZED, VIEWER, RobotAuth, require_robot
+from app.api.auth import UNAUTHORIZED, VIEWER, RobotAuth, Viewer, require_robot
 from app.api.deps import HubDep, NowDep, SessionDep, SettingsDep
+from app.api.scope import ROBOT_VIEWER
 from app.schemas.robot import ROBOT_ID_PATTERN, RobotRead, RobotRegister
 from app.schemas.run import RunPage, RunRead
 from app.schemas.telemetry import (
@@ -25,8 +26,9 @@ NOT_FOUND = {404: {"description": "Robot not found"}}
 
 
 @router.get("", dependencies=[VIEWER], response_model=list[RobotRead], summary="List the fleet")
-async def list_robots(session: SessionDep) -> list[RobotRead]:
-    return [RobotRead.model_validate(r) for r in await RobotService(session).list_all()]
+async def list_robots(session: SessionDep, user: Viewer) -> list[RobotRead]:
+    robots = await RobotService(session).list_all(user.site_id)
+    return [RobotRead.model_validate(r) for r in robots]
 
 
 @router.put(
@@ -49,7 +51,9 @@ async def register_robot(
     return RobotRead.model_validate(result.robot)
 
 
-@router.get("/{robot_id}", dependencies=[VIEWER], response_model=RobotRead, responses=NOT_FOUND)
+@router.get(
+    "/{robot_id}", dependencies=[ROBOT_VIEWER], response_model=RobotRead, responses=NOT_FOUND
+)
 async def get_robot(robot_id: RobotId, session: SessionDep) -> RobotRead:
     return RobotRead.model_validate(await RobotService(session).get(robot_id))
 
@@ -78,7 +82,7 @@ async def heartbeat(
 
 @router.get(
     "/{robot_id}/topics",
-    dependencies=[VIEWER],
+    dependencies=[ROBOT_VIEWER],
     response_model=list[TopicStateRead],
     responses=NOT_FOUND,
 )
@@ -89,7 +93,7 @@ async def robot_topics(robot_id: RobotId, session: SessionDep) -> list[TopicStat
 
 @router.get(
     "/{robot_id}/nodes",
-    dependencies=[VIEWER],
+    dependencies=[ROBOT_VIEWER],
     response_model=list[NodeStateRead],
     responses=NOT_FOUND,
 )
@@ -100,7 +104,7 @@ async def robot_nodes(robot_id: RobotId, session: SessionDep) -> list[NodeStateR
 
 @router.get(
     "/{robot_id}/events",
-    dependencies=[VIEWER],
+    dependencies=[ROBOT_VIEWER],
     response_model=list[EventRead],
     responses=NOT_FOUND,
     summary="Recent events, newest first",
@@ -117,7 +121,7 @@ async def robot_events(
 
 @router.get(
     "/{robot_id}/telemetry",
-    dependencies=[VIEWER],
+    dependencies=[ROBOT_VIEWER],
     response_model=list[SampleRead],
     responses=NOT_FOUND,
     summary="Recent telemetry samples (by server receive time), oldest first",
@@ -135,7 +139,7 @@ async def robot_telemetry(
 
 @router.get(
     "/{robot_id}/topic-history",
-    dependencies=[VIEWER],
+    dependencies=[ROBOT_VIEWER],
     response_model=list[TopicSampleRead],
     responses=NOT_FOUND,
     summary="Recent per-topic rate samples (by server receive time), oldest first",
@@ -153,7 +157,7 @@ async def robot_topic_history(
 
 @router.get(
     "/{robot_id}/runs",
-    dependencies=[VIEWER],
+    dependencies=[ROBOT_VIEWER],
     response_model=RunPage,
     responses=NOT_FOUND,
     summary="List a robot's runs, newest first",

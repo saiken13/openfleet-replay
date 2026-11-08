@@ -789,3 +789,29 @@ Both showed up in the first end-to-end demo.
 - Group/role claims are not mapped; roles are managed in OpenFleet (`openfleet users set-role`).
 - One provider at a time.
 **Date:** 2026-11-08
+
+## 039 — Multi-tenancy as sites: one shared database, robots belong to a site, users scoped to one site or all
+**Status:** Accepted (2026-11-08). The owner chose low-scale tenancy: a tenant is a site or a team.
+**Decision:**
+- **Data** (migration 0010): a `sites` table (`id` slug, `name`; `default` created), `robots.site_id` (FK, NOT NULL, default `default`, indexed) and `users.site_id` (FK, NULL = every site). Existing robots join `default`; existing users keep seeing everything.
+- **Enforcement at the API edge** (`app/api/scope.py`), not in every service:
+  - routes with `{robot_id}`, `{run_id}`, `{incident_id}` (and `/runs/compare`) use scope dependencies in place of `VIEWER`; each authenticates like `VIEWER`, then answers **404** for another site's resource, as if it didn't exist (an operator's PATCH too: 404, not 403);
+  - list routes (robots, runs, incidents, triage) filter by `robot_id IN (robots of the site)`; `/runs?robot_id=` for another site's robot is 404, not an empty page;
+  - the fleet WebSocket drops other sites' robot and incident messages (robot sites cached per socket, cleared at each re-auth); a robot WebSocket for another site is refused (1008); a socket closes when its user's site changes.
+  - Robot-authenticated writes are unchanged: a robot's key already binds it to its own row.
+- **Management:** `openfleet sites create|list|assign`, `openfleet users create --site`, `users set-site USER SITE|--all`; `OIDC_DEFAULT_SITE` for users created by Google sign-in. `/auth/me` and `RobotRead` carry `site_id`; the dashboard shows the user's site, and a site filter and per-robot badge when it sees more than one.
+**Why:**
+- **Shared database, row scoping**: right for "low scale"; one schema, one migration path, and an unscoped operator can still see the whole fleet. Schema- or database-per-tenant only pays off with isolation requirements nobody has stated.
+- **The robot is the tenancy key.** Runs, incidents, telemetry, events and triage all hang off a robot, so one column scopes everything without touching those tables or their indexes.
+- **404, not 403**: a scoped user can't probe other sites' robot names or run ids.
+- **A guard test** (`test_every_user_route_with_a_resource_id_checks_the_site`) inspects every route's dependencies, so a new route can't forget the check; it was confirmed to fail when one route was reverted.
+**Verified:**
+- `tests/test_sites.py` (10): scoped lists; unscoped sees all; 14 read paths + redetect + an operator's PATCH are 404 across sites, own site 200; triage audit scoped; the route guard; site management errors and counts; new robots in `default`; OIDC default site; the fleet socket drops another site's messages; a robot socket for another site is refused. Backend 279 pass; no model/migration drift.
+- Live through nginx: `openfleet sites create warehouse-a`, `assign amr-01 amr-02`, `users create wa-viewer --site warehouse-a`; that viewer's `/robots` and `/incidents` held only amr-01/02 and `/robots/amr-03` was 404, while the unscoped operator saw all nine robots with their sites.
+**Alternatives considered:**
+- Postgres row-level security: strong, but needs per-request session settings through the pooled async engine and makes the sweeper and robot writes special cases; the API-edge check plus the guard test is enough at this scale.
+- Many-to-many user↔site membership: not needed for "a site or a team"; the column can become a join table later without changing the routes (they ask "can this user see site X").
+**Tradeoffs:**
+- Detection thresholds, retention and robot keys are global, not per site.
+- Analysis endpoints trust the scope check on their ids; a future endpoint that takes ids in a body must check them itself (the guard only reads paths).
+**Date:** 2026-11-08

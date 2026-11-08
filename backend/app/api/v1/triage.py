@@ -3,7 +3,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Query
 
-from app.api.auth import VIEWER
+from app.api.auth import VIEWER, Viewer
 from app.api.deps import SessionDep
 from app.domain.errors import InvalidRequestError
 from app.repositories.triage_repository import TriageRepository
@@ -21,6 +21,7 @@ router = APIRouter(prefix="/triage", tags=["incidents"])
 )
 async def list_triage_actions(
     session: SessionDep,
+    user: Viewer,
     actor: Annotated[str | None, Query(max_length=200)] = None,
     robot_id: Annotated[str | None, Query(pattern=ROBOT_ID_PATTERN)] = None,
     incident_id: uuid.UUID | None = None,
@@ -38,6 +39,7 @@ async def list_triage_actions(
         incident_id=incident_id,
         before_id=before_id,
         limit=limit + 1,  # one extra row tells whether another page exists
+        site_id=user.site_id,  # DECISIONS #039
     )
     page, more = rows[:limit], len(rows) > limit
     return TriagePage(

@@ -4,7 +4,7 @@ from datetime import datetime
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import Incident, TriageAction
+from app.db.models import Incident, Robot, TriageAction
 
 
 class TriageRepository:
@@ -39,6 +39,7 @@ class TriageRepository:
         incident_id: uuid.UUID | None,
         before_id: int | None,
         limit: int,
+        site_id: str | None = None,
     ) -> list[tuple[TriageAction, str]]:
         """Newest first (by id, i.e. insertion order), with each incident's title."""
         stmt = (
@@ -47,6 +48,10 @@ class TriageRepository:
             .order_by(TriageAction.id.desc())
             .limit(limit)
         )
+        if site_id is not None:
+            stmt = stmt.where(
+                TriageAction.robot_id.in_(select(Robot.id).where(Robot.site_id == site_id))
+            )
         if actor is not None:
             stmt = stmt.where(TriageAction.actor == actor)
         if robot_id is not None:

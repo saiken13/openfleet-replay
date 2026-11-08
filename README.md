@@ -74,6 +74,7 @@ There are two kinds of credentials:
   - **viewer:** reads everything.
   - **operator:** can also triage incidents. Every triage action is recorded with who did it, on the **Audit** page.
 - **CLI and CI** (`openfleet check`) use a user API token.
+- **Sites** (multi-tenancy): every robot belongs to a site (a site or a team); a user scoped to a site sees only its robots, runs, incidents, audit and live updates, and anything else is a 404. Users without a site see everything. New robots join `default`.
 
 Manage everything on the server:
 
@@ -83,6 +84,9 @@ docker compose exec backend openfleet keys list | revoke KEY_ID
 docker compose exec backend openfleet users create alice --role operator             # prompts for a password
 docker compose exec backend openfleet users list | set-role alice viewer | passwd alice | disable alice
 docker compose exec backend openfleet users token create ci-bot --label ci --expires-days 90   # → OPENFLEET_TOKEN
+docker compose exec backend openfleet sites create warehouse-a --name "Warehouse A"
+docker compose exec backend openfleet sites assign warehouse-a amr-01 amr-02
+docker compose exec backend openfleet users set-site alice warehouse-a     # or --all; users create --site too
 docker compose exec backend openfleet retention --days 30 --dry-run   # what data retention would remove
 ```
 

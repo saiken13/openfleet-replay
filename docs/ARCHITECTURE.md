@@ -76,7 +76,7 @@ Design principle: **separate kinds of data by how they're written and read**, ra
 
 | Kind | Tables | Write pattern | Read pattern |
 |---|---|---|---|
-| Identity | `robots` (identity columns) | Rare (registration) | Everywhere |
+| Identity | `robots` (identity columns), `sites` | Rare (registration) | Everywhere |
 | Current state | `robots` (state columns), `topic_states`, `node_states` | Upsert (overwrite), every batch | Dashboard "now" view, detection snapshot |
 | Time series | `telemetry_samples`, `topic_samples` | Append, ~1/s per robot | Charts, compare, replay |
 | Discrete events | `events` | Append, sparse (only on *change*) | Timeline, replay, logs |
@@ -86,11 +86,13 @@ Design principle: **separate kinds of data by how they're written and read**, ra
 
 ### Tables
 
-Models: `backend/app/db/models.py`. Migrations: `0001` (robots, runs), `0002` (telemetry, events, incidents), `0003` (robot API keys), `0004` (users, tokens), `0005` (triage actions), `0006` (heartbeat spans), `0007` (session absolute expiry), `0008` (run retention). Status-like columns are TEXT + CHECK (DECISIONS #015). Two columns were added beyond the original plan:
+Models: `backend/app/db/models.py`. Migrations: `0001` (robots, runs), `0002` (telemetry, events, incidents), `0003` (robot API keys), `0004` (users, tokens), `0005` (triage actions), `0006` (heartbeat spans), `0007` (session absolute expiry), `0008` (run retention), `0009` (OIDC subject), `0010` (sites). Status-like columns are TEXT + CHECK (DECISIONS #015). Two columns were added beyond the original plan:
 - `topic_samples.status`: classified at ingest, so summaries and replay don't re-classify.
 - `incidents.last_detected_at`: drives the auto-resolve hysteresis.
 
-**robots**: identity and current state live in one row, but different code paths write them.
+**sites** (migration `0010`, DECISIONS #039): the tenants, a site or a team. `id TEXT PK` (slug), `name`. The migration creates `default`.
+
+**robots**: identity and current state live in one row, but different code paths write them. `site_id` (FK, default `default`) is the robot's site; `openfleet sites assign` moves it.
 - Identity: `id TEXT PK` (robot-chosen, immutable, e.g. `robot-01`), `name`, `model`, `created_at`
 - State (written only by the heartbeat/ingest/sweeper services): `status` (ONLINE/OFFLINE/DEGRADED/ERROR), `software_version`, `last_seen_at` (**server** time), `current_run_id`, `battery_pct`, `cpu_pct`, `mem_pct`, `updated_at`
 - `status` is **derived by OpenFleet** from liveness and open incidents. The robot never sets it directly.
@@ -257,7 +259,8 @@ Replaying a *recording* doesn't run new robot software, so a recorded run always
   - a session comes from a password, or from Google/OIDC (#038): authorization code + PKCE run by the backend, the ID token verified against the provider's keys, then the same session cookie (`app/core/oidc.py`);
   - sessions slide: each request extends them up to `SESSION_TTL_S` idle, never past `SESSION_MAX_S` after sign-in (#029); API tokens don't;
   - required on every read and WebSocket;
-  - roles VIEWER < OPERATOR, where triage needs OPERATOR.
+  - roles VIEWER < OPERATOR, where triage needs OPERATOR;
+  - **sites** (#039): `users.site_id` scopes a user to one site; NULL sees every site. Read routes use scope dependencies (`app/api/scope.py`: `ROBOT_VIEWER`, `RUN_VIEWER`, `INCIDENT_VIEWER`, `COMPARE_VIEWER`) that answer 404 for another site's robot, run or incident; list routes filter by site; the fleet WebSocket drops other sites' messages and a robot WebSocket for another site is refused. `tests/test_sites.py` fails if a new `{robot_id}`/`{run_id}`/`{incident_id}` route skips the check.
 - All secrets are stored as SHA-256, and passwords with scrypt.
 - Logins are throttled per username and per client IP (#027, `app/services/login_throttle.py`). The counters are in Redis, shared by replicas, or in memory without it.
 - `tests/test_user_auth.py::test_every_api_route_requires_robot_or_user_auth` keeps new routes from shipping open.
