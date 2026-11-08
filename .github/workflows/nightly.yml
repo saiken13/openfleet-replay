@@ -1,0 +1,171 @@
+# The slow regression tier (docs/BENCHMARKS.md, EMBEDDED_ROADMAP Phase 4). Runs every night
+# and on demand; never on push. Each job leaves JSON behind; the `report` job turns it into
+# one Markdown report (job summary + artifact `nightly-report`).
+#
+# What fails the run: a failed Robot Framework test, a failed scenario, a fuzzing crash.
+# What doesn't: benchmark figures. They are compared with the previous nightly on the same
+# kind of runner and flagged when much slower, but shared runners are too noisy to gate on.
+#
+# Environments, as labelled in the report: native x86_64 (the runner VM), qemu-user aarch64
+# (emulated user-mode), Renode STM32F4 (emulated MCU), compose on the runner VM. No hardware.
+name: Nightly
+
+on:
+  schedule:
+    - cron: "17 3 * * *"  # 03:17 UTC
+  workflow_dispatch:
+
+concurrency:
+  group: nightly
+  cancel-in-progress: false
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: edge
+    steps:
+      - uses: actions/checkout@v4
+      - run: >-
+          sudo apt-get update && sudo apt-get install -y ninja-build libcurl4-openssl-dev
+          g++-aarch64-linux-gnu qemu-user
+      - name: Native x86_64, optimized
+        run: |
+          cmake --preset release -DEDGE_BUILD_TESTS=OFF && cmake --build --preset release --target edge_bench
+          build/release/edge_bench --env native --json "$RUNNER_TEMP/bench-native-x86_64.json"
+      - name: aarch64 cross build, under qemu-user (emulated)
+        run: |
+          cmake --preset aarch64 -B build/bench-aarch64 -DCMAKE_BUILD_TYPE=Release -DEDGE_BUILD_TESTS=OFF
+          cmake --build build/bench-aarch64 --target edge_bench
+          qemu-aarch64 -L /usr/aarch64-linux-gnu build/bench-aarch64/edge_bench --env qemu-user \
+            --json "$RUNNER_TEMP/bench-qemu-user-aarch64.json"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bench
+          path: ${{ runner.temp }}/bench-*.json
+
+  firmware:
+    runs-on: ubuntu-latest
+    env:
+      RENODE_VERSION: "1.17.0"
+    steps:
+      - uses: actions/checkout@v4
+      - run: >-
+          sudo apt-get update && sudo apt-get install -y ninja-build gcc-arm-none-eabi
+          libnewlib-arm-none-eabi netcat-openbsd
+      - name: Install Renode and its Robot Framework requirements
+        run: |
+          curl -fsSL "https://github.com/renode/renode/releases/download/v${RENODE_VERSION}/renode-${RENODE_VERSION}.linux-portable.tar.gz" | sudo tar xz -C /opt
+          sudo ln -s "/opt/renode_${RENODE_VERSION}-portable/renode" /usr/local/bin/renode
+          sudo ln -s "/opt/renode_${RENODE_VERSION}-portable/renode-test" /usr/local/bin/renode-test
+          pip install -r "/opt/renode_${RENODE_VERSION}-portable/tests/requirements.txt"
+      - run: cmake -S firmware -B firmware/build -G Ninja && cmake --build firmware/build
+      - name: Robot Framework suite (emulated time)
+        run: firmware/renode/tests/run.sh "$RUNNER_TEMP/robot"
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: robot
+          path: |
+            ${{ runner.temp }}/robot/robot_output.xml
+            ${{ runner.temp }}/robot/report.html
+            ${{ runner.temp }}/robot/log.html
+            ${{ runner.temp }}/robot/firmware-metrics.json
+            ${{ runner.temp }}/robot/logs/
+
+  scenarios:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install httpx pyyaml
+      - run: python edge/e2e/run_scenarios.py --out "$RUNNER_TEMP/scenarios"
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scenarios
+          path: ${{ runner.temp }}/scenarios/
+      - if: failure()
+        run: docker compose --profile edge --profile firmware logs edge-agent device-sim renode backend
+
+  # Longer than CI's 45 s per target, on a corpus that grows from night to night.
+  fuzz:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: edge
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y ninja-build clang libclang-rt-18-dev
+      - uses: actions/cache/restore@v4
+        with:
+          path: edge/build/fuzz/corpus
+          key: fuzz-corpus-${{ github.run_id }}
+          restore-keys: fuzz-corpus-
+      - run: cmake --preset fuzz && cmake --build --preset fuzz
+      - name: Fuzz 10 minutes per target
+        run: |
+          mkdir -p build/fuzz/corpus/decoder build/fuzz/corpus/gateway build/fuzz/crashes
+          build/fuzz/protocol/make_seeds build/fuzz/corpus/decoder
+          build/fuzz/protocol/fuzz_decoder -max_total_time=600 -max_len=2048 \
+            -artifact_prefix=build/fuzz/crashes/ build/fuzz/corpus/decoder
+          build/fuzz/fuzz_gateway -max_total_time=600 -max_len=4096 \
+            -artifact_prefix=build/fuzz/crashes/ build/fuzz/corpus/gateway
+      - if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: edge/build/fuzz/corpus
+          key: fuzz-corpus-${{ github.run_id }}
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crashes
+          path: edge/build/fuzz/crashes/
+
+  report:
+    runs-on: ubuntu-latest
+    needs: [bench, firmware, scenarios, fuzz]
+    if: always()
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      # The previous nightly's benchmark JSON, for the "vs baseline" column.
+      - uses: actions/cache/restore@v4
+        with:
+          path: baseline
+          key: bench-baseline-${{ github.run_id }}
+          restore-keys: bench-baseline-
+      - name: Build the report
+        run: |
+          python3 scripts/nightly_report.py artifacts -o nightly-report.md \
+            --json nightly-report.json --baseline baseline || echo "REPORT_FAILED=1" >> "$GITHUB_ENV"
+          {
+            cat nightly-report.md
+            echo
+            echo "Jobs: bench ${{ needs.bench.result }}, firmware ${{ needs.firmware.result }}, scenarios ${{ needs.scenarios.result }}, fuzz ${{ needs.fuzz.result }}."
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nightly-report
+          path: |
+            nightly-report.md
+            nightly-report.json
+      - name: Keep this run's benchmarks as the next baseline
+        if: needs.bench.result == 'success'
+        run: rm -rf baseline && mkdir baseline && cp artifacts/bench/bench-*.json baseline/
+      - if: needs.bench.result == 'success'
+        uses: actions/cache/save@v4
+        with:
+          path: baseline
+          key: bench-baseline-${{ github.run_id }}
+      - name: Fail if any suite failed
+        if: >-
+          env.REPORT_FAILED == '1' || needs.firmware.result != 'success' ||
+          needs.scenarios.result != 'success' || needs.fuzz.result != 'success' ||
+          needs.bench.result != 'success'
+        run: exit 1

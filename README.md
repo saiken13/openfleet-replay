@@ -93,11 +93,17 @@ docker compose exec backend openfleet retention --days 30 --dry-run   # what dat
 
 See [DECISIONS #021, #022, #027 and #029](docs/DECISIONS.md).
 
-## Embedded & C++ (in progress)
+## Embedded & C++
 
-A C++20 edge agent, a binary device protocol and FreeRTOS firmware on an emulated STM32F4 are being added, all without physical hardware; see the [roadmap](docs/EMBEDDED_ROADMAP.md).
+A C++20 edge agent, a binary device protocol and FreeRTOS firmware on an emulated STM32F4, all without physical hardware; see the [roadmap](docs/EMBEDDED_ROADMAP.md).
 
-Phase 0 is done: the dev container (`scripts/edge-dev.sh`), CMake presets with sanitizers and an aarch64 cross-compile tested under QEMU in CI, and a Renode STM32F4 smoke test (`firmware/renode/smoke.sh`). See [edge/README.md](edge/README.md).
+- **Phase 0 (done):** the dev container (`scripts/edge-dev.sh`), CMake presets with sanitizers and an aarch64 cross-compile tested under QEMU in CI, and a Renode STM32F4 smoke test (`firmware/renode/smoke.sh`).
+- **Phase 1 (done):** `openfleet-edge-agent`, a C++20 agent for Linux robot computers without ROS. It reports CPU, memory, link latency, watched processes and its own health as robot `edge-01`. It buffers through outages with the collector's delivery contract, and ends its run on SIGTERM. Try it: `docker compose --profile edge up -d --build`, then `python edge/e2e/e2e.py`.
+- **Phase 2 (done):** the [device protocol](docs/PROTOCOL.md): COBS + CRC-16 frames from a C11 library shared with the future firmware. The agent's gateway turns a microcontroller's sensors into topics, its tasks into nodes, and its resets into events. A simulated MCU with fault injection (`openfleet-device-sim`), two libFuzzer targets, and `python edge/e2e/device_e2e.py`.
+- **Phase 3 (done):** [FreeRTOS firmware](docs/FIRMWARE.md) for an STM32F407, run on Renode's emulated STM32F4 (no board). It has sensor, comms, health and watchdog tasks. A stalled task causes a watchdog reset, which OpenFleet shows with its cause and as an incident that resolves. Try it: `docker compose --profile edge --profile firmware up -d --build`, then `python firmware/tests/firmware_e2e.py`.
+- **Phase 4 (done):** a [regression tier and benchmarks](docs/BENCHMARKS.md). YAML scenarios inject faults into the compose stack and measure how long OpenFleet takes to show them (`python edge/e2e/run_scenarios.py`). A Robot Framework suite runs the firmware on Renode in emulated time, and micro-benchmarks cover the protocol and gateway. A nightly workflow puts it all in one report, with every figure labelled native, qemu-user or Renode.
+
+See [edge/README.md](edge/README.md).
 
 ## Connect a real ROS 2 robot
 

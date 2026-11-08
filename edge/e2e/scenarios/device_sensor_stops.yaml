@@ -1,0 +1,27 @@
+name: device_sensor_stops
+description: a device sensor stops -> CRITICAL topic incident -> it restarts -> resolved
+profiles: [edge]
+services: [device-sim, edge-agent, edge-worker]
+env: simulated device (openfleet-device-sim, a host process)
+steps:
+  - expect: {topic: /mcu1/range, status: HEALTHY}
+    timeout: 60
+  - mark: stop
+    device_sim: stop-sensor 2
+  - expect: {topic: /mcu1/range, status: FAILED}
+    measure: {name: sensor_stop_to_failed_s, from: stop, max_s: 10,
+              what: "sensor stops -> backend classifies the topic FAILED"}
+  - expect: {incident: "topic_rate:/mcu1/range", open: true, severity: CRITICAL}
+    measure: {name: detection_s, from: stop, max_s: 10,
+              what: "sensor stops -> incident opened (first as WARNING while the rate falls; it is CRITICAL by this step)"}
+  - mark: restart
+    device_sim: start-sensor 2
+  - expect: {topic: /mcu1/range, status: HEALTHY}
+    measure: {name: sensor_restart_to_healthy_s, from: restart, max_s: 10,
+              what: "sensor restarts -> topic HEALTHY"}
+  - expect: {incident: "topic_rate:/mcu1/range", open: false}
+    since: restart
+    timeout: 45
+    measure: {name: resolve_s, from: restart, max_s: 30,
+              what: "sensor restarts -> incident auto-resolved (includes the 10 s hysteresis)"}
+redetect: {caught_min: 1, missed_max: 0}

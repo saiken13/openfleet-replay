@@ -136,6 +136,63 @@ services:
       backend:
         condition: service_healthy
 
+  # C++ edge agent (edge/, docs/EMBEDDED_ROADMAP.md Phases 1-2) as robot edge-01, plus a
+  # stand-in "robot process" it watches (in the agent's PID namespace) and a simulated
+  # microcontroller on a TCP "UART" (docs/PROTOCOL.md). Opt in:
+  #   docker compose --profile edge up -d --build
+  #   E2E checks: python edge/e2e/e2e.py; python edge/e2e/device_e2e.py
+  edge-agent:
+    build:
+      context: .
+      dockerfile: edge/docker/Dockerfile.agent
+    image: openfleet-edge-agent
+    profiles: [edge]
+    init: true  # tini as PID 1: forwards SIGTERM, reaps orphans
+    command:
+      - --api=http://backend:8000
+      - --robot-id=edge-01
+      - --name=Edge agent 01
+      - --model=linux-container
+      - --process=demo-worker
+      - --device=tcp://device-sim:4000  # mcu1: the device simulator
+      - --device=tcp://renode:3456      # mcu2: the FreeRTOS firmware on Renode (profile firmware)
+    environment:
+      OPENFLEET_API_KEY: ofk_demo_edge-01_public-not-secret  # public demo key
+    stop_grace_period: 20s  # flush (<= 5 s) + ending the run
+    depends_on:
+      backend:
+        condition: service_healthy
+
+  # Simulated MCU 1 (device protocol over TCP, like Renode's UART socket). Faults on demand:
+  #   docker compose exec device-sim sh -c 'echo "stop-sensor 2" >> /tmp/devsim.ctl'
+  device-sim:
+    image: openfleet-edge-agent
+    profiles: [edge]
+    entrypoint: ["openfleet-device-sim", "--listen", "4000", "--control-file", "/tmp/devsim.ctl"]
+    stop_grace_period: 2s
+    depends_on:
+      - edge-agent  # the same image; built by edge-agent
+
+  # The FreeRTOS firmware (firmware/, docs/FIRMWARE.md) on Renode's emulated STM32F4: MCU 2,
+  # its USART2 on TCP 3456 for the agent. Emulated hardware, not a board. Opt in:
+  #   docker compose --profile edge --profile firmware up -d --build
+  #   E2E check: python firmware/tests/firmware_e2e.py
+  renode:
+    build:
+      context: .
+      dockerfile: firmware/docker/Dockerfile.renode
+    profiles: [firmware]
+    stop_grace_period: 2s
+
+  edge-worker:
+    image: openfleet-edge-agent
+    profiles: [edge]
+    pid: "service:edge-agent"
+    entrypoint: ["demo-worker", "infinity"]
+    stop_grace_period: 1s
+    depends_on:
+      - edge-agent
+
 volumes:
   pgdata:
   rosctl:

@@ -1,0 +1,14 @@
+# OpenFleet demo firmware on an emulated STM32F4 (docs/FIRMWARE.md). Emulated, not a board.
+#   renode --disable-gui -P 1234 -e 'include @firmware/renode/openfleet.resc'
+# Variables (set before including): $bin (ELF), $repl (platform), $uart_port (TCP).
+$bin ?= @/src/firmware/build/openfleet-fw.elf
+$repl ?= @/src/firmware/renode/openfleet-f4.repl
+$uart_port ?= 3456
+$machine_resc ?= @/src/firmware/renode/openfleet-machine.resc
+
+include $machine_resc
+
+# USART2 = the device protocol link, served on TCP for the gateway (`--device tcp://...`).
+emulation CreateServerSocketTerminal $uart_port "uart" false
+connector Connect sysbus.usart2 uart
+start

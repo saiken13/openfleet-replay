@@ -10,6 +10,8 @@ flowchart LR
     subgraph Edge["Robot side"]
         SIM["Simulator<br/>(MVP)"]
         ROS["ROS 2 Collector<br/>(collector/)"]
+        EDGE["C++ edge agent<br/>(edge/)"]
+        MCU["Microcontrollers: device simulator (mcu1),<br/>FreeRTOS firmware on Renode STM32F4 (mcu2)"]
     end
 
     subgraph Backend["FastAPI backend — one process (modular monolith)"]
@@ -27,6 +29,8 @@ flowchart LR
 
     SIM -- "HTTP JSON batches" --> R
     ROS -. "same API" .-> R
+    EDGE -. "same API" .-> R
+    MCU -. "COBS+CRC frames<br/>UART / TCP" .-> EDGE
     R --> S
     SW --> S
     S --> REP --> PG
@@ -46,18 +50,20 @@ The backend stores those summaries. It decides whether something is unhealthy an
 | Component | Responsibility | Must NOT |
 |---|---|---|
 | **Simulator** (`simulator/`) | Simulates N robots: registration, heartbeats, runs, metrics, topic rates, node states, logs. Runs scripted failure **scenarios** (YAML) with a seeded RNG so failures are reproducible. It is the reference client for the API. | Import backend code. It may only use the public HTTP API. |
-| **C++ edge agent** (`edge/`, in progress) | Robot-side C++20 agent for non-ROS / embedded Linux devices ([EMBEDDED_ROADMAP](EMBEDDED_ROADMAP.md)). Phase 0 is done: the toolchain (#031) and the bounded queue its threads share. It will speak the same telemetry API as its own robot. | Share a run with another sender (seq collisions); judge health itself. |
+| **C++ edge agent** (`edge/`) | Robot-side C++20 agent for Linux robot computers without ROS ([EMBEDDED_ROADMAP](EMBEDDED_ROADMAP.md), #031, #032). It samples `/proc` (CPU, memory, watched processes, its own health), measures link latency, and delivers batches with the collector's uplink contract as its own robot (e.g. `edge-01`). Threads: sampler → bounded queue → uplink, plus signals; SIGTERM ends the run ABORTED. As a **gateway** (#033) it reads microcontrollers over the [device protocol](PROTOCOL.md) (`protocol/`, C11, shared with the firmware): sensors → topics, tasks → nodes, resets and link errors → log events. A device that resets unexpectedly is held DEGRADED for 20 s (#034). |
+| **Firmware** (`firmware/`) | FreeRTOS on an STM32F407, run only on Renode's emulated STM32F4 ([FIRMWARE.md](FIRMWARE.md), #034). Sensor, comms, health and watchdog tasks; a supervisor-gated IWDG; a boot record for the reset cause. It speaks the device protocol with the same `protocol/` library. | Know about OpenFleet's API: it only frames data for the gateway. | Share a run with another sender (seq collisions); judge health itself. |
 | **ROS 2 collector** (`collector/`) | On the robot. Raw best-effort subscriptions count topic arrivals in a sliding window. Node liveness comes from the ROS graph, logs from `/rosout` (WARN+), battery from `BatteryState`, and CPU/memory from psutil. It POSTs the same `TelemetryBatch` as the simulator. Its uplink buffers through outages and self-heals runs (DECISIONS #020). | Deserialize messages or run inside the robot's own process. |
 | **API routers** (`backend/app/api/`) | HTTP/WS boundary: parse and validate input with Pydantic, call a service, map domain errors to HTTP codes. | Contain business rules or SQL. |
 | **Services** (`backend/app/services/`) | Use-case logic: "ingest a batch", "process a heartbeat", "open/resolve incidents". They own transaction boundaries and call the detection engine and realtime hub. | Know about HTTP. |
 | **Repositories** (`backend/app/repositories/`) | All SQL for one aggregate (robots, runs, telemetry, events, incidents). Return ORM or domain objects. | Make business decisions. |
 | **Detection engine** (`backend/app/detection/`) | Pure functions: `RobotSnapshot → list[Finding]`. Topic-health classification lives here too. | Touch the DB, the clock, or the network (the caller passes in `now`). |
 | **Incident reconciler** (in `services/incident_service.py`) | Compares the current findings with open incidents and decides to open, escalate, or resolve. This is the stateful half of detection. | — |
-| **Sweeper** (`backend/app/workers/`) | Runs every `sweep_interval_s`. It catches problems that only show up as *missing* data: missing heartbeats, stale topics, abandoned runs. | Run a tick on two replicas at once: each tick takes a Postgres advisory lock (DECISIONS #024). |
+| **Sweeper** (`backend/app/workers/`) | Runs every `sweep_interval_s`. It catches problems that only show up as *missing* data: missing heartbeats, stale topics, abandoned runs. | Run a tick on two replicas at once: each tick takes a Postgres advisory lock (DECISIONS #024). Judge silence it wasn't there to hear: after a restart it waits one timeout before marking robots OFFLINE (BUG-007). |
 | **Realtime hub** (`backend/app/realtime/`) | Pub/sub: local delivery, plus Redis fan-out to other replicas when `REDIS_URL` is set (DECISIONS #025). Services publish *after commit*, and WebSocket connections subscribe. | Be the source of truth. If the browser reconnects, it reloads data over REST. |
 | **Replay** (`services/analysis_service.py` for the stream, `detection/replay.py` for re-detection) | Builds a run's ordered, merged event stream (read-only), and re-runs the current detection rules over a recorded run (DECISIONS #023, #028). | Hold server-side playback state. Pacing happens in the client. |
 | **PostgreSQL** | Source of truth for identity, current state, time series, events, and incidents. Enforces idempotency and dedup with constraints. | Store large binary recordings. Those go to object storage in Phase 2+. |
 | **Frontend** (`frontend/`) | React + TS + Vite SPA. A single reducer turns events into dashboard state, and both **live** (WS) and **replay** (stream + client clock) feed that same reducer. | Compute health or incident logic itself. |
+| **Regression tier** (`edge/e2e/run_scenarios.py`, `firmware/renode/tests/`, `edge/bench/`, `.github/workflows/nightly.yml`) | YAML scenarios against compose that inject faults and measure latencies on the server clock, then `redetect` the run; Robot Framework on Renode in emulated time; micro-benchmarks; one nightly report with every figure labelled by environment ([BENCHMARKS.md](BENCHMARKS.md), #035). | Gate on benchmark figures (reported, not gated), or compare figures across environments. |
 | **CLI** (`backend/openfleet_cli/`, installed as `openfleet`) | `openfleet check <run> --config regression.yaml` returns a non-zero exit code when a check fails. A thin HTTP client. | Re-implement detection logic. |
 
 ## 3. Data model
@@ -149,7 +155,7 @@ Models: `backend/app/db/models.py`. Migrations: `0001` (robots, runs), `0002` (t
 6. Commit, then publish to the hub.
 
 **Liveness:** every `SWEEP_INTERVAL_S`, the sweeper (on whichever replica wins the tick's advisory lock, DECISIONS #024):
-- Re-evaluates robots that are not OFFLINE but whose `last_seen_at < now - HEARTBEAT_TIMEOUT_S`. This derives OFFLINE, and HeartbeatMissingRule fires if they were in a run (DECISIONS #019).
+- Re-evaluates robots that are not OFFLINE but whose `last_seen_at < now - HEARTBEAT_TIMEOUT_S`. This derives OFFLINE, and HeartbeatMissingRule fires if they were in a run (DECISIONS #019). A freshly started process waits until it has listened for that long (and `RUN_ABANDON_AFTER_S` before aborting runs), so robots aren't blamed for the backend's own outage (BUG-007).
 - Aborts the current run of robots silent for longer than `RUN_ABANDON_AFTER_S`.
 - With `RETENTION_DAYS` set, at most once per `RETENTION_INTERVAL_S`: compacts finished runs older than that (#030, `app/services/retention_service.py`).
 

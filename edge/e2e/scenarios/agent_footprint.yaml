@@ -1,0 +1,22 @@
+name: agent_footprint
+description: the agent's own CPU and memory with a device link, idle and under host CPU load
+profiles: [edge]
+services: [device-sim, edge-agent, edge-worker]
+env: simulated device (openfleet-device-sim, a host process)
+steps:
+  - expect: {topic: /mcu1/imu, status: HEALTHY}
+    timeout: 60
+  - sleep: 10
+  - sample_agent: {seconds: 30, label: agent_idle}
+  - mark: load
+    exec: [edge-agent, "stress-ng --cpu 0 --timeout 45s --temp-path /tmp"]
+  - expect: {incident: high_cpu, open: true}
+    timeout: 40
+    measure: {name: high_cpu_detection_s, from: load, max_s: 30,
+              what: "CPU saturated (stress-ng on every CPU) -> high_cpu incident opened"}
+  - sample_agent: {seconds: 15, label: agent_under_load}
+  - expect: {topic: /mcu1/imu, min_hz: 40}
+  - expect: {incident: high_cpu, open: false}
+    since: load
+    timeout: 90
+redetect: {caught_min: 1, missed_max: 0}

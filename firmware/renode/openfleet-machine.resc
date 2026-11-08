@@ -1,0 +1,22 @@
+# The emulated MCU only (docs/FIRMWARE.md): platform, firmware image and reset behaviour, with
+# no I/O wiring and not started. openfleet.resc adds the TCP UART and starts it for the
+# gateway; the Robot Framework tests (firmware/renode/tests) add a file UART and drive it in
+# emulated time. Emulated, not a board.
+# Variables (set before including): $bin (ELF), $repl (platform).
+$bin ?= @/src/firmware/build/openfleet-fw.elf
+$repl ?= @/src/firmware/renode/openfleet-f4.repl
+
+# Sync emulated time every 1 ms instead of every 0.1 ms: about 1 host core instead of 1.6 on
+# the dev Mac (measured), still finer than the firmware's 1 ms tick and 20 ms sampling.
+emulation SetGlobalQuantum "0.001"
+
+mach create "mcu2"
+machine LoadPlatformDescription $repl
+
+# What a reset does (the IWDG requests one): reload the image and restart from its vector
+# table. SRAM is not cleared, as on the real chip, so the boot record survives.
+macro reset
+"""
+    sysbus LoadELF $bin
+"""
+runMacro $reset

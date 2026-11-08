@@ -1,0 +1,6 @@
+// The STM32F4 Discovery board as Renode models it, with SysTick at the 16 MHz the firmware
+// runs at (the internal oscillator after reset; the stock description assumes 72 MHz).
+using "platforms/boards/stm32f4_discovery-kit.repl"
+
+nvic:
+    systickFrequency: 16000000

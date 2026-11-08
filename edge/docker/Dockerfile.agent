@@ -1,0 +1,29 @@
+# The edge agent and the device simulator as a container (docker compose --profile edge).
+# Build context: the repo root (see Dockerfile.agent.dockerignore). Built natively for the
+# Docker host's architecture: arm64 on an Apple Silicon Mac, x86_64 on CI. It samples the
+# container's /proc, which for CPU and memory is the Docker VM as a whole: a simulated
+# "robot computer", not real robot hardware.
+FROM ubuntu:24.04 AS build
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        g++ cmake ninja-build libcurl4-openssl-dev ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /src
+COPY protocol protocol
+COPY edge edge
+RUN cmake -S edge -B /build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+        -DEDGE_BUILD_TESTS=OFF -DEDGE_BUILD_BENCH=OFF -DEDGE_BUILD_AGENT=ON \
+    && cmake --build /build \
+    && cmake --install /build --prefix /out --strip
+
+FROM ubuntu:24.04
+ENV DEBIAN_FRONTEND=noninteractive
+# stress-ng and procps are for the demo and the e2e (load the CPU, inspect processes).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libcurl4t64 ca-certificates stress-ng procps \
+    && rm -rf /var/lib/apt/lists/* \
+    && cp /usr/bin/sleep /usr/local/bin/demo-worker
+COPY --from=build /out/bin/openfleet-edge-agent /out/bin/openfleet-device-sim /usr/local/bin/
+RUN useradd --system --no-create-home edge
+USER edge
+ENTRYPOINT ["openfleet-edge-agent"]

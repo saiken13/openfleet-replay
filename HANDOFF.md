@@ -2,11 +2,86 @@
 
 ## Context
 - **AI assistant/model:** Claude Code, Opus 5.5 (`claude-opus-5-5`)
-- **Date:** 2026-11-06
+- **Date:** 2026-11-07
 - **Branch:** `main` (remote: https://github.com/saiken13/openfleet-replay)
 - **Latest commit:** see `git log -1`
 
 ## Current state
+**Embedded Phase 4 done (2026-11-07, DECISIONS #035; [docs/BENCHMARKS.md](docs/BENCHMARKS.md)): regression tier + benchmarks. Every embedded phase is complete.**
+- **Scenario runner:** `edge/e2e/run_scenarios.py` runs the YAML files in `edge/e2e/scenarios/`: `device_sensor_stops`, `device_link_reconnect`, `backend_outage`, `agent_footprint` and `firmware_watchdog`.
+  - `mark` takes the server clock; `measure` is the effect's server-side timestamp minus the mark, with a `max_s` budget.
+  - Each scenario ends its run and gates on `redetect`.
+  - Reports go to `edge/build/scenarios/` (JSON + `scenarios.md`).
+- **Robot Framework:** `firmware/renode/tests/firmware.robot` + `OfpKeywords.py`, run with `firmware/renode/tests/run.sh` (Renode's `renode-test`).
+  - It drives the emulation with `emulation RunFor` and reads USART2 from a file, so results are deterministic: the metrics were byte-identical across runs, even with the host under load.
+  - 8 tests. Also in the CI `firmware` job.
+  - `openfleet.resc` was split: `openfleet-machine.resc` is the machine only, and callers pass `$machine_resc`.
+- **Benchmarks:** `edge/bench/bench.cpp` → `edge_bench --env LABEL [--json]`. ctest runs `edge_bench_smoke` (`--quick`) on every preset (now 108 C/C++ tests).
+- **Nightly:** `.github/workflows/nightly.yml` (03:17 UTC + manual). It runs the benchmarks (native x86_64, aarch64 under qemu-user), the Robot suite, every scenario, and 10 min of fuzzing per target on a cached corpus. Then `scripts/nightly_report.py` writes one report: the job summary plus the `nightly-report` artifact.
+  - Benchmarks are compared with the previous nightly (Actions cache) and only flagged, never gated.
+- **BUG-007 fixed (found by `backend_outage`):** a restarted backend opened `heartbeat_missing` on robots that had been buffering through its outage. It would also have aborted their runs after an outage over 60 s. The sweeper now waits until it has listened one `HEARTBEAT_TIMEOUT_S` before marking robots OFFLINE, and one `RUN_ABANDON_AFTER_S` before aborting runs (`Sweeper(listening_since=...)`, set in `main.py`). 2 tests; backend 253 pass.
+- **Verified locally:** all of the above; the C/C++ presets native, asan, tsan and x86_64; `renode_test.py`, `gdb_check.sh`, and the three e2e scripts. **Neither workflow has run on GitHub yet** (nor have Phases 1–3's jobs).
+- Not done: the optional full-system QEMU (Debian arm64 + systemd).
+- **Next:** nothing planned. The options below need the owner's decision.
+
+**Earlier (kept for context):**
+
+**Embedded Phase 3 done (2026-11-07, DECISIONS #034; [docs/FIRMWARE.md](docs/FIRMWARE.md)): FreeRTOS firmware on Renode's emulated STM32F4.**
+- **`firmware/`:** FreeRTOS V11.1.0 (pinned), register-level board support, 16 MHz, static allocation only (about 12 KB flash, 21 KB RAM).
+  - Tasks: sensor (imu 50 Hz, range 10 Hz → data queue), comms (control queue first), health (HEALTH with stack high-water marks, DESCRIBE), watchdog.
+  - The IWDG is kicked only while every task checks in (`app/supervisor.c`). The reset cause is in a boot record at `0x2001FF00` (`app/boot_record.c`), because Renode doesn't model `RCC_CSR`.
+  - Device id 2, so OpenFleet shows `/mcu2/*` and `mcu2*`.
+- **Gateway changes:**
+  - Node `mcu<id>` is DEGRADED for 20 s after an unexpected reset (`reset_hold`), so a 1 s watchdog reset becomes a `node_health` incident.
+  - Undescribed sensors and tasks wait 6 s for their names (`describe_grace`).
+- **Renode** (`firmware/renode/openfleet.resc`): 16 MHz SysTick overlay, `reset` macro (reload the ELF; SRAM kept), USART2 → TCP 3456, 1 ms quantum.
+  - Faults go through the monitor (port 1234) into `fault_ctl` at `0x2001FE00`: +0 stall task, +4 comms delay ms, +8 stop sensors.
+- **Tests:**
+  - 107 C/C++ tests, all presets; 9 of them are firmware logic on the host.
+  - `firmware/tests/renode_test.py`: Renode, with an independent Python decoder `ofp.py`.
+  - `firmware/renode/gdb_check.sh`: GDB through Renode.
+  - `firmware/tests/firmware_e2e.py`: compose profile `firmware`, Renode container → agent → backend.
+  - All pass, and the Phase 1 and 2 e2e still pass.
+- **CI:** new job `firmware` (ARM build, Renode test, GDB check). `edge-agent-e2e` also runs the firmware e2e. **None of this has run on GitHub yet.**
+- Phase 4 followed (above).
+
+**Embedded Phase 2 done (2026-11-07, DECISIONS #033; spec [docs/PROTOCOL.md](docs/PROTOCOL.md)): the device protocol and the gateway.**
+- **`protocol/`:** a C11 library with no allocation: COBS + CRC-16/CCITT-FALSE frames (14-byte header, ≤ 240-byte payload) and HELLO / SENSOR / HEALTH / LOG / DESCRIBE messages. It has a streaming decoder and validating parsers, and is built as part of `edge/`.
+- **Gateway** (`edge/src/gateway.cpp`), via `--device tcp://H:P | serial:/dev/X[@BAUD]` (`device_link.cpp`, one thread per link):
+  - sensors → topics `/mcu<id>/<name>`; tasks → nodes `mcu<id>/<task>`; the device → node `mcu<id>` (STOPPED when silent 3 s, DEGRADED at ≥ 25 % bad frames);
+  - resets (HELLO, boot id, uptime) → log events; dedup and loss with a 64-frame window; link-error summaries every ≤ 10 s.
+- **Simulator:** `openfleet-device-sim` (`DeviceSim`). Faults come from `--command` or lines appended to `--control-file`. Compose service `device-sim` (TCP :4000); the agent's command has `--device=tcp://device-sim:4000`.
+- **Tests:** 96 C/C++ tests. They pass on native, ASan+UBSan, TSan, clang and x86_64 under qemu. Valgrind is clean with a faulty device link.
+- **Fuzzing:** `cmake --preset fuzz` builds `fuzz_decoder`, `fuzz_gateway` and `make_seeds`. 60 s each locally found nothing. CI fuzzes 45 s each.
+- **Live, `edge/e2e/device_e2e.py` PASS:** a stopped sensor opened and resolved a CRITICAL topic incident; both reset kinds became events; a corrupted link was counted while the agent kept running; silence and a failed task opened and resolved node incidents; it reconnected on one run. The Phase 1 e2e still passes.
+- **CI:** the `edge` job adds clang and libclang-rt and a fuzz step; `edge-agent-e2e` also runs the device e2e. **None of this has run on GitHub yet.**
+- **Next: Phase 3 (FreeRTOS firmware on Renode STM32F4). It needs the owner's go.**
+
+**BUG-006 fixed (2026-11-07):** replicas starting together on a fresh database raced in `alembic upgrade head` (the cause of CI's red `e2e-multi-replica` on d71efc4). `alembic/env.py` now serializes migrators with an advisory lock; there's a 6-process race test in `tests/test_migrations.py`. Also fixed a flaky test, `test_retention.py::test_compacting_keeps_summary...`: it started two runs on one robot at the same `started_at`, so the #016 tie-break by random id sometimes aborted the new one (0 failures in 20 runs since).
+
+**Embedded Phase 1 done (2026-11-07, DECISIONS #032): the C++ edge agent `openfleet-edge-agent`.**
+- **What it reports, as its own robot `edge-01`:** CPU, memory, link latency, watched processes as nodes, its own health as node `edge_agent`, and startup and outage log lines.
+- **Threads:** sampler → `BoundedQueue` → uplink, plus a signal thread.
+- **Uplink:** the collector's contract (ordered outbox of 600, same-seq retry, jittered backoff 0.5–10 s, 404/409 → fresh run, other 4xx → drop). SIGTERM flushes ≤ 5 s and ends the run ABORTED; `--duration` ends it SUCCESS.
+- **Layout:** `edge_core` has no network code (an `HttpClient` interface); libcurl is only in `src/curl_client.cpp` and the binary. nlohmann/json is pinned by hash.
+- **Compose profile `edge`:**
+  - `edge-agent`: tini, unprivileged user, key `ofk_demo_edge-01_public-not-secret` in `examples/demo-robot-keys.json`.
+  - `edge-worker`: a `demo-worker` process in the agent's PID namespace.
+  - E2E script: `edge/e2e/e2e.py`.
+- **systemd unit:** `edge/packaging/` (verified with `systemd-analyze verify` only).
+- **CI:**
+  - The `edge` job now installs libcurl and also builds the binary.
+  - The aarch64 cross job builds and tests `edge_core` and skips the binary (no aarch64 libcurl on the runner).
+  - New job `edge-agent-e2e`.
+- **Tests:** 61 GoogleTest tests. They pass in the arm64 dev container on native, ASan+UBSan, TSan, clang 18 and x86_64 under qemu. Valgrind on the real binary is clean.
+- **Verified live (`edge/e2e/e2e.py` PASS, about 2 min):**
+  - `stress-ng` opened and resolved `high_cpu`.
+  - Stopping `edge-worker` opened and resolved `node_health:demo-worker`.
+  - A 30 s backend outage lost nothing (104 batches, seq 0–103 contiguous, one run, and a "35 s unreachable" log).
+  - SIGTERM ended the run ABORTED.
+- **Adjusted criterion:** the no-loss outage is 30 s, not 60 s, because the server aborts runs after 60 s of silence (`RUN_ABANDON_AFTER_S`).
+- **Next: Phase 2 (protocol + gateway). It needs the owner's go.**
+
 **Data retention done (2026-11-07, DECISIONS #030). The 7-item batch is complete.** With `OPENFLEET_RETENTION_DAYS` set (off by default, including in compose), the sweeper compacts finished runs older than that, at most once per hour, 20 runs per pass. Compacting freezes the summary aggregates into `runs.summary`, deletes samples, topic samples, heartbeat spans and log events, and sets `runs.compacted_at` (migration 0008). Summary, compare and check read the frozen data; redetect returns 422; the run page shows a notice. CLI: `openfleet retention --days N [--dry-run] [--json]`. Code: `app/services/retention_service.py`, `Sweeper._retention`, `openfleet_cli/retention.py`. Tests: `tests/test_retention.py` (5, incl. a real-commit CLI test). Verified live: a dry run over the dev DB listed 103 runs and deleted nothing; compacting one throwaway run left its summary byte-identical, redetect refused it, and the run page showed the notice (screenshot).
 
 **Embedded Phase 0 done (2026-11-07, DECISIONS #031); roadmap: [docs/EMBEDDED_ROADMAP.md](docs/EMBEDDED_ROADMAP.md).**
@@ -49,7 +124,7 @@
 - Docker Compose: Postgres + backend + nginx frontend + simulator
 - Screenshots taken of the fleet, incident and replay pages
 
-CI jobs: backend, simulator, frontend, edge (C++: sanitizers + aarch64 cross under qemu), collector, ros2-collector-e2e, `e2e-regression-check` (threshold check, the re-detection gate, and the telemetry-stall replay check) and `e2e-multi-replica`.
+CI jobs: backend, simulator, frontend, edge (C++: sanitizers + aarch64 cross under qemu), edge-agent-e2e, collector, ros2-collector-e2e, `e2e-regression-check` (threshold check, the re-detection gate, and the telemetry-stall replay check) and `e2e-multi-replica`.
 
 ## Completed
 - **Backend** (`backend/app/`):
@@ -72,11 +147,13 @@ CI jobs: backend, simulator, frontend, edge (C++: sanitizers + aarch64 cross und
   - Modes: real time, `--fast`, and `--loop`.
 - **Frontend** (`frontend/`): fleet, robot (live), incidents, incident detail (charts, timeline, first signal, triage), runs, run replay, and compare.
 - **Tests:**
-  - Backend: 250 (incl. 5 retention tests, 7 sliding-session tests, 9 heartbeat-span tests, 10 login-throttle tests, 4 triage-audit tests, 9 bus tests, 4 sweeper-lock tests, 15 pure replay-engine tests and 8 redetect API tests), against real Postgres, including concurrency races and mutation-checked guards. Auth tests: `tests/test_auth.py` (robots), `tests/test_user_auth.py` (users, with a route-coverage test), the WS auth in `tests/test_realtime.py`, and the CLI in `tests/test_cli.py`.
+  - Backend: 253 (incl. 2 restart-grace tests for BUG-007, a concurrent-migration race test, incl. 5 retention tests, 7 sliding-session tests, 9 heartbeat-span tests, 10 login-throttle tests, 4 triage-audit tests, 9 bus tests, 4 sweeper-lock tests, 15 pure replay-engine tests and 8 redetect API tests), against real Postgres, including concurrency races and mutation-checked guards. Auth tests: `tests/test_auth.py` (robots), `tests/test_user_auth.py` (users, with a route-coverage test), the WS auth in `tests/test_realtime.py`, and the CLI in `tests/test_cli.py`.
   - Simulator: 15.
   - Collector: 24.
+  - Edge (C++): 108 ctest tests (GoogleTest incl. the C protocol library and the firmware's portable logic, plus the bench smoke), 2 libFuzzer targets, plus `edge/e2e/e2e.py`, `edge/e2e/device_e2e.py` and the 5 scenarios (`edge/e2e/run_scenarios.py`).
+  - Firmware: `firmware/tests/renode_test.py` (Renode), `firmware/renode/tests/firmware.robot` (8, Robot Framework, emulated time), `firmware/renode/gdb_check.sh`, `firmware/tests/firmware_e2e.py` (compose).
   - Frontend: 17 (reducer, ReplayClock, auth helpers, redetect overrides).
-- **Docs:** README, ARCHITECTURE, FLOW (real file:function paths), DECISIONS 001–031, BUGS 001–003, CONSTRAINTS.
+- **Docs:** README, ARCHITECTURE, FLOW (real file:function paths), PROTOCOL, FIRMWARE, BENCHMARKS, DECISIONS 001–035, BUGS 001–007, CONSTRAINTS.
 
 ## Currently working
 Nothing in progress.
@@ -102,6 +179,7 @@ None open. Fixed bugs are recorded in docs/BUGS.md.
   - The `clock` fixture controls server time for API tests.
   - The `sweeper` fixture shares the test transaction; call `await sweeper.tick(now)`.
   - That fixture has `lock=None` (no advisory lock); set `sweeper.lock = AdvisoryLock(engine, KEY)` to test locking, with a key other than the real sweeper's so a running dev backend can't interfere.
+- **Two runs on one robot in a test** need different `started_at`: with equal times, the "latest run" (#016) is decided by the random UUID, and the new run may be aborted as superseded.
 - **Real-commit tests** go in `tests/test_concurrency.py`, using ids prefixed `concurrency-`. `purge_robots()` cleans them up.
 - **Alembic in tests:** runs through `run_in_fresh_thread()`.
 - **Enum changes:** changing a `StrEnum` needs a migration that updates the CHECK constraint (#015).
@@ -111,6 +189,32 @@ None open. Fixed bugs are recorded in docs/BUGS.md.
   - Run everything C/C++ through `scripts/edge-dev.sh` (it builds the image on first use); the Mac has no gdb or valgrind.
   - Locally the container is arm64, so `native` = aarch64 and the cross preset to try is `x86_64`. The `aarch64` preset is the CI path (from x86_64).
   - Renode's console quits at the end of its input: run it as `sleep infinity | renode --disable-gui --console ...`.
+  - The container is `--rm`: files written outside `/src` (e.g. `/tmp`) are gone after each `edge-dev.sh` call. Put scratch files under `edge/build/` (git-ignored).
+  - ASan in the arm64 Docker VM: about 11 µs per allocation (roughly 200× native), so the ASan ctest takes ~20 s. Tests mustn't assume native speed: pace producers on queue depth, not the clock.
+  - TSan locally: run `ctest --preset tsan` as is; `setarch -R` isn't permitted in the container.
+  - The agent container runs as an unprivileged user in `/`: `stress-ng` there needs `--temp-path /tmp`.
+  - `docker compose --profile edge down` stops the edge services; a plain `docker compose down` leaves them running.
+  - Outage tests longer than `RUN_ABANDON_AFTER_S` (60 s) of robot silence end in a fresh run, by design (#032).
+  - **Device simulator control:** `docker compose --profile edge exec device-sim sh -c 'echo "CMD" >> /tmp/devsim.ctl'`. Only lines appended after it starts are run (the file survives restarts). The commands are in `openfleet-device-sim --help` and docs/PROTOCOL.md.
+  - The agent image's build context is the repo root (it needs `protocol/`); `edge/docker/Dockerfile.agent.dockerignore` keeps the context to `edge/` and `protocol/`.
+  - **libFuzzer needs `-fsanitize=fuzzer-no-link` on the code under test** (set by `EDGE_FUZZ`); without it coverage stays near zero and fuzzing is blind.
+  - **Scenarios / Robot (Phase 4):**
+    - `run_scenarios.py` measures from `mark`s on the *server* clock (offset measured once via psql). Mark *before* an action whose effect can happen before the action returns (e.g. `compose start backend`: batches arrive before `up --wait` returns).
+    - An incident's `started_at` is its first opening (maybe WARNING), even if the scenario then expects CRITICAL.
+    - Restarting device-sim is an unexplained reset to the gateway (HELLO sent before the link came up), so `mcu1` stays DEGRADED for the 20 s reset hold. That's by design (#034).
+    - `/proc/<pid>/status` lists VmHWM before VmRSS.
+    - Renode `include @x` paths aren't relative to the including script; pass absolute paths (`$machine_resc`).
+    - The dev image now has Robot Framework (pip, with `python3-dev` for psutil on arm64). Rebuild an older image (command below).
+  - **Firmware/Renode:**
+    - Build with `scripts/edge-dev.sh bash -c 'cd /src && cmake -S firmware -B firmware/build -G Ninja && cmake --build firmware/build'`.
+    - Renode needs a `reset` macro, or an IWDG reset jumps to address 0 and crashes.
+    - Never put the boot record in a linker section: Renode's ELF loader zero-fills LOAD segments on every reset.
+    - The monitor socket never closes: send with `timeout 3 nc -N localhost 1234`. `nc -q 1` hangs forever.
+    - Renode costs about 1 host core. Because the agent measures the whole Docker VM, Renode can push edge-01's CPU up (it did, before the WFI idle hook and the 1 ms quantum).
+    - The firmware's `RCC_CSR` read always gives `0x0E000000` under Renode.
+    - Device-time rates are exact; Renode ran at about 1.01–1.06× real time on the Mac.
+    - For Renode tests, use `-P <port>` (monitor over TCP) rather than `--console` with a held-open stdin.
+  - The dev image now includes `libclang-rt-18-dev` (clang's sanitizer and fuzzer runtimes). Rebuild an older image: `docker build -t openfleet-edge-dev -f edge/docker/Dockerfile.dev edge/docker`.
   - macOS ships bash 3.2: empty arrays under `set -u` need `${a[@]+"${a[@]}"}`.
 - **Simulator binary:** `openfleet-sim` lives in `simulator/.venv/bin/`, not the backend venv.
 - **Logging in from a script:** `POST /api/v1/auth/login` needs the `X-OpenFleet-Client` header (CSRF defense), as do cookie-authenticated writes.
@@ -145,6 +249,15 @@ docker compose up -d postgres
 (cd backend && .venv/bin/pytest)
 (cd simulator && .venv/bin/pytest)
 (cd frontend && npm test && npm run typecheck)
+scripts/edge-dev.sh bash -c 'cmake --preset native && cmake --build --preset native && ctest --preset native'   # also asan, tsan, x86_64
+python edge/e2e/e2e.py                                   # C++ agent against the compose stack
+python edge/e2e/device_e2e.py                            # device gateway + simulated MCU
+scripts/edge-dev.sh bash -c 'cd /src && python3 firmware/tests/renode_test.py'   # firmware on Renode
+python firmware/tests/firmware_e2e.py                    # firmware -> agent -> backend (compose)
+scripts/edge-dev.sh bash -c 'cd /src && firmware/renode/tests/run.sh'   # Robot Framework on Renode (emulated time)
+python edge/e2e/run_scenarios.py [NAME ...]              # measured scenarios + redetect (pip install httpx pyyaml)
+python scripts/nightly_report.py edge/build -o report.md # one report from local results
+scripts/edge-dev.sh bash -c 'cmake --preset fuzz && cmake --build --preset fuzz'   # then see edge/README.md
 ```
 
 ## Collector notes
@@ -163,7 +276,10 @@ docker compose up -d postgres
 6. ~~**Sliding sessions.**~~ Done (#029): idle 12 h, cap 7 d, extension throttled to once per 5 min; WebSockets don't slide.
 7. ~~**Data retention.**~~ Done (#030): compact runs (frozen summary, raw rows deleted) via the sweeper or `openfleet retention`; off by default.
 
-**Next: Embedded Phase 1 (C++ edge agent).** Phase 0 is done. See [docs/EMBEDDED_ROADMAP.md](docs/EMBEDDED_ROADMAP.md).
+**Embedded expansion** ([docs/EMBEDDED_ROADMAP.md](docs/EMBEDDED_ROADMAP.md)): Phases 0–4 are done. Left over, each needing the owner's go:
+- First: push, and watch `CI` and a manual `Nightly` run on GitHub. None of the Phase 1–4 jobs have run there; expect fixes for runner differences (x86_64, Renode portable, renode-test requirements).
+- The optional full-system QEMU (Debian arm64 + the agent as a systemd service).
+- Postponed from the roadmap: ROS 2 integration (the agent republishes MCU data as ROS topics).
 
 **Not in the batch: these need the owner's decisions first.**
 - OIDC: which provider; auto-create users or invite only?

@@ -1,0 +1,26 @@
+name: firmware_watchdog
+description: FreeRTOS firmware on Renode - a stalled task -> IWDG reset -> incident -> recovery
+profiles: [edge, firmware]
+services: [renode, edge-agent, edge-worker]
+env: emulated MCU (FreeRTOS firmware on Renode's STM32F4 model)
+steps:
+  - expect: {topic: /mcu2/imu, status: HEALTHY}
+    timeout: 120
+  - expect: {node: mcu2, state: RUNNING}
+  - mark: stall
+    renode_poke: [0, 1]
+  - expect: {log: "mcu2 reset (watchdog)"}
+    timeout: 30
+    measure: {name: stall_to_reset_seen_s, from: stall, max_s: 15,
+              what: "task stalls -> watchdog reset reported by the gateway"}
+  - expect: {incident: "node_health:mcu2", open: true}
+    measure: {name: detection_s, from: stall, max_s: 20,
+              what: "task stalls -> node_health:mcu2 incident opened"}
+  - expect: {topic: /mcu2/imu, min_hz: 45}
+    since: stall
+  - expect: {incident: "node_health:mcu2", open: false}
+    since: stall
+    timeout: 75
+    measure: {name: recovery_s, from: stall, max_s: 60,
+              what: "task stalls -> incident resolved (20 s reset hold + 10 s hysteresis)"}
+redetect: {caught_min: 1, missed_max: 0}

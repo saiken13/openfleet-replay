@@ -509,3 +509,194 @@ Both showed up in the first end-to-end demo.
 - The smoke test downloads Antmicro's prebuilt demo ELF, so it's not in CI (an external dependency). Phase 3 replaces it with our own firmware and a CI job.
 - qemu-user results say nothing about performance on real ARM hardware.
 **Date:** 2026-11-07
+
+## 032 — C++ edge agent: three owned threads around a drop-oldest queue, the collector's uplink contract, libcurl only at the edge
+**Status:** Accepted (2026-11-07). Phase 1 of [EMBEDDED_ROADMAP](EMBEDDED_ROADMAP.md).
+**Decision:**
+- `openfleet-edge-agent` (`edge/`) runs on a Linux robot computer as its own robot (e.g. `edge-01`), and reports:
+  - CPU (`/proc/stat` deltas), memory (`MemAvailable`, falling back to `MemFree + Buffers + Cached` on old kernels).
+  - Link latency: the full time of the last successful telemetry request, as `net_latency_ms`.
+  - Watched processes as nodes: RUNNING; DEGRADED if stopped by a signal (`T`); ERROR if only zombies are left; STOPPED if none is found. Matching is on `comm`, which the kernel cuts to 15 characters.
+  - Its own health as node `edge_agent`: DEGRADED when the sampler missed its period or batches were lost since the last batch.
+  - Host uptime goes into a startup log line, and an outage summary into a log line when the API comes back. The backend is unchanged.
+- **Threads:** sampler → `BoundedQueue<Sample>` (64, drop-oldest, #031) → uplink, plus a signal thread. SIGTERM and SIGINT are blocked in every thread and taken with `sigtimedwait`. The uplink thread's backoff sleep is the queue's timed pop, so it keeps taking samples while it waits.
+- **Uplink:** `Uplink` follows `collector/openfleet_collector/uplink.py` exactly:
+  - An ordered outbox (600 batches), and a retry re-sends the same seq.
+  - Network errors and 5xx: retry. 401/403: keep the batch buffered.
+  - 404/409: drop the dead run's batches and open a fresh run (404 re-registers). Other 4xx: drop the batch.
+  - Backoff doubles from 0.5 s to 10 s with equal jitter (each delay is in [base/2, base]).
+  - SIGTERM: flush for at most 5 s, then end the run **ABORTED**. `--duration S` ends it SUCCESS.
+- **Layering:** `edge_core` (parsers, sampler, batch JSON, uplink, loops) has no network code and takes an `HttpClient` interface. libcurl lives in `curl_client.cpp` and the binary only.
+  - nlohmann/json 3.11.3 is fetched and pinned by SHA-256, like GoogleTest.
+  - The API key comes only from `OPENFLEET_API_KEY`, never a flag: argv is readable by every user through `/proc`.
+- Compose profile `edge`: the agent container (`init: true`, unprivileged user) plus `edge-worker`, a stand-in robot process in the agent's PID namespace. Also `edge/e2e/e2e.py`, CI job `edge-agent-e2e`, and a hardened systemd unit (`edge/packaging/`).
+**Why:**
+- Same contract as the collector: the server's dedup and run semantics are already proven against that behaviour (#013, #016), and one rule for every uplink is easier to reason about than two.
+- ABORTED on SIGTERM, unlike the collector's SUCCESS: the roadmap asked for it, and an agent stopped from outside means the run was interrupted, not completed. A deliberate end uses `--duration`.
+- Keeping the network at the edge means every line of logic is built and tested under every preset, including the aarch64 cross build under qemu, which has no aarch64 libcurl. Only the ~80-line transport is not cross-tested.
+- Owned threads plus one queue are few enough to verify with TSan. That is easier to show correct than an event loop for this little concurrency.
+**Verified:**
+- **Tests:** 61 GoogleTest tests (parsers against `/proc` files saved from a real container, sampler, batch contract, backoff bounds, every uplink case, the loops with a racing producer through an outage, config).
+  - In the arm64 dev container they pass on native, ASan+UBSan, TSan, clang 18, and the x86_64 cross build under `qemu-x86_64`.
+  - Valgrind on the real binary against the live backend: no errors, no leaks.
+- **Live on the compose stack, `edge/e2e/e2e.py`, all passing:**
+  - `edge-01` registered with CPU, memory and latency.
+  - `stress-ng` on every CPU opened `high_cpu`, which resolved afterwards.
+  - Stopping `edge-worker` opened `node_health:demo-worker`, which resolved after restart.
+  - A 30 s backend outage: the agent logged 35 s unreachable and buffered 35 batches. The run ended with 104 batches, seq 0–103 contiguous, 0 dropped, one run.
+  - SIGTERM ended the run ABORTED.
+- `systemd-analyze verify` passes on the unit. It has not been run under a real systemd boot.
+**Alternatives considered:**
+- Reusing `BoundedQueue` as the outbox: the outbox needs peek-retry-pop and "drop one run's batches", so it's a plain deque owned by one thread.
+- A hand-written HTTP/1.1 client: the roadmap rules it out; libcurl gives TLS, proxies and timeouts.
+- A YAML config file: flags plus one environment variable are enough here, and work as they are in systemd and compose.
+- Heartbeats: telemetry already counts as contact, as for the collector.
+**Tradeoffs:**
+- **No batch is lost only while the robot's silence stays under the server's `RUN_ABANDON_AFTER_S` (60 s).** Past that, the sweeper aborts the run and the agent opens a fresh one, dropping the old run's buffered batches. That's the collector's contract too. So the roadmap's "60 s outage" criterion is met at 30 s in the e2e, with the longer path covered by unit tests. Keeping a dead run's data would need a server change (re-opening or appending to an ABORTED run).
+- In a container, CPU and memory are the Docker VM's, not a cgroup's; the process list is the container's PID namespace. On a real robot computer it is the whole machine.
+- Samples taken before the first run opens are counted, not sent.
+- Under ASan in the arm64 Docker VM, each allocation costs about 11 µs, so the loop test paces its producer on queue depth. None of these timings are benchmarks (Phase 4).
+**Date:** 2026-11-07
+
+## 033 — Device protocol: COBS + CRC-16 frames from one C11 library, a gateway that maps devices onto topics/nodes/logs, and a seeded fault-injecting simulator
+**Status:** Accepted (2026-11-07). Phase 2 of [EMBEDDED_ROADMAP](EMBEDDED_ROADMAP.md). Specification: [PROTOCOL.md](PROTOCOL.md).
+**Decision:**
+- **Protocol (`protocol/`, C11, no allocation, no I/O):**
+  - Frames are `COBS(header | payload | CRC-16/CCITT-FALSE) 0x00`. The 14-byte header holds version, type, device id, seq, boot id, uptime ms and length; payloads are at most 240 bytes.
+  - Messages: HELLO (reset reason, firmware), SENSOR, HEALTH (task states, stack high-water marks), LOG and DESCRIBE (names and expected rates, repeated every 5 s).
+  - A byte-at-a-time decoder with a fixed 258-byte buffer judges each frame at its delimiter. Payload parsers validate every field.
+- **Gateway (`edge/src/gateway.cpp`):** maps devices onto the existing model:
+  - sensor → topic `/mcu<id>/<name>`, with the rate measured per window;
+  - task → node `mcu<id>/<task>`;
+  - device → node `mcu<id>` (STOPPED when silent for 3 s, DEGRADED when ≥ 25 % of frames are bad);
+  - resets, device logs and link-error summaries → log events.
+  - It detects resets by HELLO, a new boot id, or uptime going backwards.
+  - It drops duplicates, counts gaps and drops stale frames with a 64-frame window per boot.
+- **Transport (`device_link.cpp`):** `--device tcp://HOST:PORT | serial:/dev/PATH[@BAUD]`. Everything is an fd read with `poll`; a dropped link is reopened with backoff. One device thread and one `Gateway` per link; the sampler thread takes each gateway's window into its sample (the agent's threads, #032).
+- **Simulator (`openfleet-device-sim`, `DeviceSim`):** encodes with the same C library. Faults (corrupt, truncate, drop, duplicate, fragment, garbage, oversize, silence, resets with or without HELLO, task states, a stopped sensor) are driven by commands, and the fault RNG is seeded.
+- Compose `edge` profile: a `device-sim` service on TCP :4000; the agent has `--device=tcp://device-sim:4000`. E2E: `edge/e2e/device_e2e.py`. CI: a libFuzzer step in `edge`, and the device e2e in `edge-agent-e2e`.
+**Why:**
+- **COBS + CRC-16:**
+  - Bounded overhead and trivial on a Cortex-M.
+  - Resynchronises at the next delimiter after any fault, so one bad frame never costs the next.
+  - The CRC catches every single- and double-bit error (tested exhaustively for single bits) at 2 bytes per frame.
+  - A JSON or line protocol would cost more on the MCU and still need framing and checksums.
+- **One C library for both ends** means the encoder the firmware ships is the one the tests and fuzzers exercise. C11 with no allocation is what the firmware can use.
+- **No new backend concepts.** The backend already judges topic rates, node states and logs, so a stopped sensor, a hung task and a silent MCU become incidents by existing, tested rules. The robot aggregates; the backend judges.
+- **DESCRIBE is periodic, not only at boot**, because the gateway may start after the device. Rates are measured gateway-side, so a sensor's frames need no timestamps of their own.
+- **Three reset signals**, because HELLO can be lost on a noisy line and not every MCU keeps a boot counter.
+- **Fuzzing:** the decoder fuzzer sees raw bytes. A second, structured fuzzer builds valid frames from the fuzz input, because random bytes almost never pass a CRC and would leave the gateway's logic unexplored.
+**Verified:**
+- **Tests:** 96 C/C++ tests (35 new for the protocol, the gateway and the transports) pass in the arm64 dev container on native, ASan+UBSan, TSan, clang 18, and the x86_64 cross build under qemu. Valgrind on the agent with a live faulty device link: no errors, no leaks.
+- **Fuzzing (60 s each, locally):** `fuzz_decoder` 0.73 M runs, `fuzz_gateway` 0.26 M runs, no findings. The first run showed that coverage was not reaching the libraries; `-fsanitize=fuzzer-no-link` on our targets fixed that (decoder coverage went from 16 to 99 edges).
+- **Live, `edge/e2e/device_e2e.py` PASS (about 2 min):**
+  - `/mcu1/imu` ~50 Hz and `/mcu1/range` ~10 Hz HEALTHY, with expected rates from DESCRIBE; four nodes RUNNING.
+  - Stopping sensor 2 opened CRITICAL `topic_rate:/mcu1/range`, which resolved after restart.
+  - The watchdog reset and the HELLO-less reset were both logged as events.
+  - Under corrupt 0.1, truncate 0.05, duplicate 0.2, fragmentation, 3000 garbage bytes and an oversized frame, the agent kept running, imu stayed delivered, and the errors were reported. Over the run: 3347 good frames, 81 bad (36 CRC, 9 short, 3 overflow), 68 duplicates, 52 lost.
+  - 10 s of silence opened and resolved `node_health:mcu1`; a task error opened and resolved `node_health:mcu1/comms`.
+  - A device-sim restart was logged, reconnected, and stayed on one run.
+  - The Phase 1 e2e still passes.
+**Alternatives considered:**
+- SLIP: unbounded worst-case doubling, and escape handling spread through the code.
+- Length-prefixed frames: a corrupted length desynchronises the stream until a heuristic recovers.
+- CRC-32: twice the overhead, without a meaningful gain for ≤ 256-byte frames.
+- Protobuf/nanopb: a schema compiler and more code on the MCU, for five small messages.
+- Retransmission or ACKs: telemetry is periodic, so the next reading replaces a lost one. Loss is counted instead.
+- Python for the simulator: it would not exercise the C encoder the firmware uses.
+**Tradeoffs:**
+- **Not exercised yet:** the device link has no authentication (it's a wire inside the robot), and `serial:` has been tested on ptys only, not a real UART adapter.
+- Link errors can't be attributed to a device id (the frame is unreadable), so they degrade every device on that link.
+- With 1 s windows, a sensor's rate is measured over what arrived in the window. Short bursts of loss show as rate dips, which is the intended signal.
+- A bug in my simulator, found by the e2e: a restarted simulator replayed old control commands (the file survives a container restart), producing a spurious reset. The gateway reported it correctly. The simulator now only runs lines appended after it starts.
+**Date:** 2026-11-07
+
+## 034 — FreeRTOS firmware on Renode's STM32F4: a supervisor-gated watchdog, a boot record for the reset cause, and the gateway holding a reset device DEGRADED
+**Status:** Accepted (2026-11-07). Phase 3 of [EMBEDDED_ROADMAP](EMBEDDED_ROADMAP.md). Details: [FIRMWARE.md](FIRMWARE.md).
+**Decision:**
+- **The firmware** (`firmware/`): FreeRTOS V11.1.0 (pinned by hash) on an STM32F407 at its 16 MHz reset clock, with board support written against registers.
+  - Four static tasks: sensor (50 Hz imu, 10 Hz range), comms (sole UART owner, control queue first), health (task states and stack high-water marks), watchdog.
+  - No heap. It speaks the Phase 2 protocol as device 2 through the same `protocol/` C library.
+- **Watchdog:** the IWDG is kicked only while `sup_may_kick` says every supervised task checked in on time. The first late task latches the supervisor; the watchdog task notes "watchdog, task N" in the boot record, logs the stall, and stops kicking, and the IWDG resets the MCU.
+- **Boot record:** no-init RAM at `0x2001FF00`, with a magic and a seal. It gives a boot id (random after power-on, then +1) and the reset reason: the supervisor's note first, `RCC_CSR` flags as the fallback.
+- **Gateway** (#033) extended:
+  - After an unexpected reset (watchdog, brownout, unknown, or one detected without HELLO), node `mcu<id>` is DEGRADED for 20 s (`reset_hold`).
+  - Sensors and tasks seen before their DESCRIBE wait 6 s (`describe_grace`) before a placeholder name is reported.
+- **Emulation:**
+  - `firmware/renode/openfleet.resc`: a SysTick overlay at 16 MHz, a `reset` macro that reloads the image (SRAM kept), USART2 on TCP 3456, and a 1 ms time quantum.
+  - Faults are injected by writing `fault_ctl` (`0x2001FE00`) through Renode's monitor: stall a task, slow the link, stop a sensor.
+- **Tests and CI:**
+  - The portable logic (`firmware/app`) is host-tested in every edge preset.
+  - `firmware/tests/renode_test.py` uses an independent Python protocol reader.
+  - `firmware/renode/gdb_check.sh` checks GDB.
+  - Compose profile `firmware` (a Renode container) with `firmware/tests/firmware_e2e.py`.
+  - CI job `firmware`, plus the e2e in `edge-agent-e2e`.
+**Why:**
+- **The supervisor gates the watchdog** instead of each task kicking it, so a single stalled task resets the MCU even while others run. That's the failure the roadmap asked for. Latching makes the reset, not a lucky late check-in, the recovery.
+- **Why the boot record:** Renode doesn't model the reset flags (`RCC_CSR` reads `0x0E000000` regardless; RMVF is ignored), found with a bare-metal probe. A note written by the supervisor works on the emulator and on real silicon, and names the task, which no hardware flag can.
+- **Why the reset hold:** a watchdog reset recovers in about 1 s. As a bare event, it would be a log line nobody sees. Holding the device DEGRADED briefly turns it into a `node_health` incident through the existing rule, with no backend change. It's a measurement of the device's recent stability, like `edge_agent` going DEGRADED after lost batches; the backend still decides.
+- **Two queues:** with one, a slow link filled the queue with readings and the HEALTH and "readings dropped" reports timed out. The Renode test caught this. Readings are the droppable traffic; reports about them are not.
+- **16 MHz without PLL setup:** the honest default for a register-level demo; the emulator is configured to match, not the other way round.
+**Verified:**
+- **ARM build:** about 12 KB flash, 21 KB RAM, warning-free with `-Werror` on our sources.
+- **Host tests:** 107 C/C++ tests (9 new for the supervisor and boot record, 2 for the reset hold and DESCRIBE grace) pass on native, ASan+UBSan, TSan, clang, and x86_64 under qemu. The gateway fuzzer was rerun on the changed code.
+- **`renode_test.py` (in the dev container, arm64 Renode) PASS:**
+  - HELLO power-on; DESCRIBE; imu 50.00 Hz and range 10.00 Hz in device time; every task RUNNING (lowest free stack 219 words); contiguous seq; 0 bad frames.
+  - A stalled sensor task gave the stall log, then HELLO watchdog with boot id +1, then "previous boot ended by the watchdog: task sensor stopped checking in after 7000 ms up", and sampling resumed.
+  - A 60 ms/frame link dropped readings (reported), the sensor task went DEGRADED, and nothing reset.
+- **`gdb_check.sh`:** gdb-multiarch attached through Renode's GDB server and read the live boot record, the supervisor and the tick count.
+- **Live, `firmware_e2e.py` PASS:**
+  - `/mcu2/imu` and `/mcu2/range` HEALTHY; four nodes RUNNING.
+  - The stall produced, in order: the firmware's stall log, `mcu2 reset (watchdog)`, the next boot's cause, `node_health:mcu2` opened, and resolved after the hold.
+  - The slow link gave `mcu2/sensor` DEGRADED, `/mcu2/imu` DEGRADED, the drop logs, no reset, and recovery.
+  - The Phase 1 and Phase 2 e2e still pass.
+**Alternatives considered:**
+- The FreeRTOS POSIX port for the task logic: the decision logic is pure C and host-tested directly, and Renode runs the real binary, so a third execution environment would add little.
+- Vendor HAL/CubeMX: a lot of generated code for four peripherals, and it hides what the firmware does to the hardware.
+- Each task kicking the watchdog: a stalled task goes unnoticed while another kicks.
+- A backend rule for reset log events: it would be a new backend concept for something the existing node rule already expresses.
+- Wokwi: its CLI needs a cloud token (#031).
+**Tradeoffs:**
+- **Emulation only.** Peripheral behaviour is Renode's model. Polled UART TX is fine there; real hardware at higher rates would want DMA. The board support follows the reference manual, but nothing has run on silicon.
+- **Host cost:** Renode needs about 1 host core for this firmware on the dev Mac, measured with `docker stats` after the WFI idle hook and the 1 ms quantum; it was about 2.6 cores before. Because the agent measures the Docker VM, emulator load can itself raise edge-01's CPU. That happened once (a `high_cpu` incident) before these fixes.
+- Emulation ran at about 1.01–1.06× real time here. Rates are asserted in device time; wall-clock rates depend on the host.
+- No device-side receive path. Faults go in through the emulator's monitor, not the protocol.
+- **Bugs found while building this:**
+  - A NOLOAD linker section for the boot record sat in an ELF LOAD segment, and Renode's loader zero-filled it on every reset. The record is now addressed directly and only reserved in the linker script.
+  - `nc -q 1` never exited on Renode's monitor socket and hung the e2e; it now uses `timeout` + `nc -N`, and every compose call has a timeout.
+**Date:** 2026-11-07
+
+## 035 — Regression tier and benchmarks: YAML scenarios that measure, Robot Framework on Renode in emulated time, a nightly report that labels every figure
+**Status:** Accepted (2026-11-07). Phase 4 of [EMBEDDED_ROADMAP](EMBEDDED_ROADMAP.md). Details: [BENCHMARKS.md](BENCHMARKS.md).
+**Decision:**
+- **Scenario runner** (`edge/e2e/run_scenarios.py`, `edge/e2e/scenarios/*.yaml`): each scenario starts compose services, injects faults (device-sim commands, Renode `fault_ctl` writes, stopping containers, `stress-ng`), and waits for what OpenFleet shows.
+  - A `mark` records the server clock; a `measure` is the server-side timestamp of the effect (incident `started_at`/`resolved_at`, event `received_at`) minus the mark, with a budget (`max_s`).
+  - Each scenario ends its run (SIGTERM → ABORTED) and gates on `redetect` over it (caught/missed/new).
+  - Five scenarios: `device_sensor_stops`, `device_link_reconnect`, `backend_outage`, `agent_footprint`, `firmware_watchdog`.
+- **Robot Framework on Renode** (`firmware/renode/tests/firmware.robot`, run with Renode's `renode-test`): 8 tests that advance the emulation with `emulation RunFor` and read USART2 from a file backend, decoded by `ofp.py` (`OfpKeywords.py`). Includes a same-seed-same-bytes determinism test and Renode-labelled metrics (instructions per second and per frame, watchdog recovery time, stack headroom). `openfleet.resc` was split so the tests reuse the machine (`openfleet-machine.resc`) without the TCP UART.
+- **Benchmarks** (`edge/bench/bench.cpp`, target `edge_bench`): CRC, encode, streaming decode, the gateway's per-frame receive path, and the per-batch JSON. Median of 5 samples of ≥ 300 ms. Every report carries the caller's `--env` label plus arch, compiler and build type. ctest runs it once with `--quick` on every preset so it can't rot.
+- **Nightly workflow** (`.github/workflows/nightly.yml`, 03:17 UTC and on demand): benchmarks (native x86_64; aarch64 under qemu-user), the Robot suite, all scenarios, 10 min of fuzzing per target on a corpus cached across nights, then `scripts/nightly_report.py` writes one Markdown report (job summary + artifact).
+- The Robot suite also runs in the regular CI `firmware` job (~70 s).
+**Why:**
+- **Measure in the existing tests' terms.** The scenarios assert the same things as the e2e scripts, but also record how long each took on the server's clock, so a regression in latency shows up as a number, not as a flaky timeout.
+- **Emulated time for the Robot tier.** The Phase 3 test reads a free-running emulator against the wall clock, so a slow host changes what it sees. Driving Renode with `RunFor` makes counts exact (499–501 imu readings in 10 s), makes the byte stream reproducible (tested), and lets a slow CI runner take longer without failing.
+- **Labels over comparisons.** A qemu-user figure says how fast the emulator is (the gateway is ~5× slower there, JSON ~14×), not the CPU. Figures are compared only with the same environment and architecture, and only against the previous nightly on the same kind of runner, because a committed baseline from the dev Mac (arm64) would be meaningless on an x86_64 runner.
+- **Gate on correctness, report performance.** Shared runners vary by tens of percent; a benchmark gate would be flaky. Slowdowns ≥ 1.5× are flagged in the report. Latency budgets in scenarios (`max_s`) are generous bounds on behaviour (e.g. detection < 10 s), not performance targets.
+- **Redetect on every scenario run** turns each recorded edge run into a regression check on the detection rules. It found BUG-007 on its first run.
+**Verified (dev Mac, arm64 Docker VM):**
+- `edge_bench` native (RelWithDebInfo): gateway 287 ns/frame, decode 229 ns per SENSOR frame, batch JSON 8.2 µs; x86_64 under qemu-user: 1.43 µs and 112 µs.
+- Robot suite 8/8 PASS in 70 s: 322,599 instructions per emulated second (about 2 % of 16 MHz at 1 IPC), 5,186 per frame, watchdog recovery 1,250 ms of emulated time, lowest free stack 217 words.
+- Scenarios 5/5 PASS: sensor stop → incident 0.7 s; device gone → `node_health:mcu1` 3.8 s; gateway reconnect 1.3 s, data HEALTHY again 2.3 s; backend restart → first batch 3.2 s, no batch lost, no `heartbeat_missing`; agent 0.65 % of a core and 11.8 MiB RSS with a 60 frame/s device; watchdog stall → reset seen 1.8 s, incident resolved 30.8 s. Redetect: missed 0 everywhere.
+- `nightly_report.py` on those results, with the baseline path exercised.
+**Alternatives considered:**
+- Renode's line-oriented UART keywords: the link is binary COBS frames, so a small keyword library over the existing independent decoder fits better.
+- Google Benchmark: one more fetched dependency for six cases; a short harness gives exactly the JSON the report needs.
+- A committed benchmark baseline: wrong for any runner other than the machine that made it.
+- Folding the e2e scripts into scenarios: the e2e scripts stay as the per-push CI checks; the scenarios are the measured, slower tier.
+- Full-system QEMU (Debian arm64 with the agent as a systemd service): optional in the roadmap and not done. On an 8 GB Mac it competes with Renode and compose, and the systemd unit is already verified with `systemd-analyze`.
+**Tradeoffs:**
+- The nightly workflow has not run on GitHub yet (nor have Phases 1–3's CI jobs).
+- Scenario latencies include the agent's 1 s sampling period and the backend's 2 s sweeper; they are end-to-end figures for this stack, not component costs.
+- Agent CPU is read from its own `/proc` (utime + stime over wall time); RSS is VmRSS. Under `stress-ng` the agent's share fell (0.26 %), because it competes for the same CPUs; that is a figure for this VM, not a property of the agent.
+- Renode instruction counts are not cycles; the "duty share" assumes 1 instruction per cycle.
+**Date:** 2026-11-07

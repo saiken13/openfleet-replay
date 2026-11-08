@@ -1,0 +1,6 @@
+# For edge/e2e (Python). Same style as collector/ and simulator/.
+line-length = 100
+target-version = "py312"
+
+[lint]
+select = ["E", "F", "I", "UP", "B"]

@@ -1,0 +1,29 @@
+name: backend_outage
+description: the backend is down for 15 s -> the agent buffers -> nothing lost, time to catch up
+profiles: [edge]
+services: [device-sim, edge-agent, edge-worker]
+env: simulated device (openfleet-device-sim, a host process)
+steps:
+  - expect: {topic: /mcu1/imu, status: HEALTHY}
+    timeout: 60
+  - mark: outage
+    compose: [stop, backend]
+  - sleep: 15
+  # Marked before the start command: the backend accepts batches before compose's health
+  # wait returns, so a mark after it would miss the moment.
+  - mark: restart
+    compose: [start, backend]
+  - expect: {batches_since: restart}
+    timeout: 30
+    measure: {name: uplink_recovery_s, from: restart, max_s: 25,
+              what: "backend start issued -> first buffered batch accepted (backend start-up + the agent's 0.5-10 s jittered backoff)"}
+  - expect: {log: "unreachable"}
+    since: outage
+    timeout: 30
+  - sleep: 5
+  - expect: {no_batch_lost: true}
+  # BUG-007: the restarted backend must not blame the robot for the backend's own outage.
+  - expect: {no_incident: heartbeat_missing}
+    timeout: 1
+  - expect: {node: edge_agent, state: RUNNING}
+redetect: {missed_max: 0}

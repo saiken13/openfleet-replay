@@ -241,3 +241,7 @@ def test_demo_keys_file_covers_every_bundled_robot() -> None:
     expected.add(collector["robot_id"])
     assert expected <= set(keys)
     assert keys[collector["robot_id"]] == collector["api_key"]
+    # The C++ edge agent (compose profile `edge`) gets its id and key from docker-compose.yml.
+    edge = yaml.safe_load((root / "docker-compose.yml").read_text())["services"]["edge-agent"]
+    robot_id = next(a.split("=", 1)[1] for a in edge["command"] if a.startswith("--robot-id="))
+    assert keys[robot_id] == edge["environment"]["OPENFLEET_API_KEY"]

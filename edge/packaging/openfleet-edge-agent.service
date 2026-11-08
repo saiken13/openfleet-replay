@@ -1,0 +1,44 @@
+# systemd unit for the edge agent on a Linux robot computer.
+#   install -m755 openfleet-edge-agent /usr/local/bin/
+#   install -m644 openfleet-edge-agent.service /etc/systemd/system/
+#   install -m600 /dev/null /etc/openfleet/edge-agent.env   # then add OPENFLEET_API_KEY=...
+#   systemctl daemon-reload && systemctl enable --now openfleet-edge-agent
+#
+# Checked with `systemd-analyze verify` in the dev container; not run under a real systemd
+# boot (see edge/README.md).
+[Unit]
+Description=OpenFleet edge agent
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/openfleet/edge-agent.env
+# Edit the robot id, API URL and watched processes for this machine.
+ExecStart=/usr/local/bin/openfleet-edge-agent --robot-id=edge-01 --api=https://openfleet.example.com
+# SIGTERM: flush buffered batches (<= 5 s), end the run ABORTED.
+KillSignal=SIGTERM
+TimeoutStopSec=20
+Restart=on-failure
+RestartSec=5
+
+# It only reads /proc and talks HTTP(S).
+DynamicUser=yes
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+MemoryMax=64M
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,33 @@
+# The OpenFleet firmware running on Renode's emulated STM32F4 (docker compose --profile
+# firmware). Emulated hardware, not a board. Build context: the repo root (see the
+# .dockerignore next to this file).
+FROM ubuntu:24.04 AS build
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        gcc-arm-none-eabi libnewlib-arm-none-eabi cmake ninja-build ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /src
+COPY protocol protocol
+COPY firmware firmware
+RUN cmake -S firmware -B /build -G Ninja && cmake --build /build
+
+FROM ubuntu:24.04
+ARG TARGETARCH
+ARG RENODE_VERSION=1.17.0
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates curl netcat-openbsd \
+    && rm -rf /var/lib/apt/lists/*
+RUN if [ "$TARGETARCH" = "arm64" ]; then pkg=linux-arm64-portable; else pkg=linux-portable; fi \
+    && curl -fsSL "https://github.com/renode/renode/releases/download/v${RENODE_VERSION}/renode-${RENODE_VERSION}.${pkg}.tar.gz" \
+       | tar xz -C /opt \
+    && ln -s /opt/renode_${RENODE_VERSION}-portable /opt/renode \
+    && ln -s /opt/renode/renode /usr/local/bin/renode
+WORKDIR /opt/renode
+COPY --from=build /build/openfleet-fw.elf /fw/
+COPY firmware/renode/openfleet.resc firmware/renode/openfleet-machine.resc \
+     firmware/renode/openfleet-f4.repl /fw/
+# UART (device protocol) on 3456; Renode monitor on 1234 (fault injection, see FIRMWARE.md).
+EXPOSE 3456 1234
+CMD ["renode", "--disable-gui", "-P", "1234", \
+     "-e", "$bin=@/fw/openfleet-fw.elf; $repl=@/fw/openfleet-f4.repl; $machine_resc=@/fw/openfleet-machine.resc; include @/fw/openfleet.resc"]

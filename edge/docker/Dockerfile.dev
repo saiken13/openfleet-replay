@@ -14,9 +14,10 @@ ARG RENODE_VERSION=1.17.0
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        build-essential cmake ninja-build clang lld gdb valgrind \
+        build-essential cmake ninja-build clang lld libclang-rt-18-dev gdb valgrind \
         git curl ca-certificates python3 pkg-config file \
         libcurl4-openssl-dev qemu-user \
+        gcc-arm-none-eabi libnewlib-arm-none-eabi gdb-multiarch netcat-openbsd \
     && if [ "$TARGETARCH" = "arm64" ]; then cross=g++-x86-64-linux-gnu; \
        else cross=g++-aarch64-linux-gnu; fi \
     && apt-get install -y --no-install-recommends "$cross" \
@@ -28,5 +29,14 @@ RUN if [ "$TARGETARCH" = "arm64" ]; then pkg=linux-arm64-portable; else pkg=linu
        | tar xz -C /opt \
     && ln -s /opt/renode_${RENODE_VERSION}-portable /opt/renode \
     && ln -s /opt/renode/renode /usr/local/bin/renode
+
+# Robot Framework for `renode-test` (firmware/renode/tests, Phase 4): the core of Renode's
+# tests/requirements.txt, pinned to the versions it lists, plus pyyaml for the scenario
+# runner. A separate layer so the image above stays cached.
+RUN apt-get update && apt-get install -y --no-install-recommends python3-pip python3-dev \
+    && rm -rf /var/lib/apt/lists/* \
+    && pip3 install --break-system-packages --no-cache-dir \
+        robotframework==6.1 robotframework-retryfailed==0.2.0 psutil==5.9.4 \
+        "pyyaml==6.0.*" "telnetlib3==2.0.*" construct==2.10.68 pyelftools==0.30
 
 WORKDIR /src

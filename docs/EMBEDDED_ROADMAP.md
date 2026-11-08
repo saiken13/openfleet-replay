@@ -1,6 +1,6 @@
 # Embedded & Embedded Linux expansion — roadmap
 
-**Status:** Approved by the owner (2026-11-07). **Phase 0 done** (DECISIONS #031); Phase 1 next.
+**Status:** Approved by the owner (2026-11-07). **Phase 0 done** (DECISIONS #031). **Phase 1 done** (#032). **Phase 2 done** (#033). **Phase 3 done** (#034). **Phase 4 done** (#035). Every phase is complete; the optional full-system QEMU item was not built.
 **Hard constraint:** no physical hardware. Everything is native, cross-compiled + emulated, or simulated, and every claim and measurement says which.
 
 ## Facts that shaped the plan
@@ -29,7 +29,7 @@
 - CI skeleton.
 - **Renode spike:** does it run on the M2 (native or Docker)? Is the STM32F4 UART reachable over TCP? Fallback: the FreeRTOS POSIX port in a Linux container.
 
-**Phase 1: C++20 edge agent, `edge/` (5–7).**
+**Phase 1: C++20 edge agent, `edge/` (5–7). Done (#032):** all criteria met, with one adjustment. The no-loss outage is 30 s in the e2e, because the server aborts a run after 60 s of silence (`RUN_ABANDON_AFTER_S`); longer outages take the fresh-run path, as in the collector.
 - Monitors CPU (`/proc/stat` deltas), memory, uptime, configured process health and link latency.
 - Threads: sampler, uplink, signals, joined by a bounded queue.
 - Uplink follows `collector/openfleet_collector/uplink.py`'s contract: ordered bounded buffer, same-seq retry, backoff with jitter, 409/404 → fresh run, other 4xx → drop. SIGTERM → ABORTED.
@@ -38,19 +38,27 @@
 - **CI:** native + ASan/UBSan, TSan, and an aarch64 cross build with tests under `qemu-aarch64`.
 - **Done when:** `edge-01` is on the dashboard; `stress` opens `high_cpu`; a 60 s backend outage loses no batch; SIGTERM ends the run.
 
-**Phase 2: protocol + gateway, `protocol/` + `docs/PROTOCOL.md` (4–5).**
+**Phase 2: protocol + gateway, `protocol/` + `docs/PROTOCOL.md` (4–5). Done (#033):** all criteria met. Every fault in the brief is covered; there are two libFuzzer targets; the compose e2e passes.
 - Frames: COBS + CRC-16/CCITT; header holds version, device id, type, seq, timestamp, length. The decoder streams into fixed buffers with no malloc.
 - Gateway in the agent, over a transport abstraction (TCP or pty): drops duplicates, detects resets (boot counter or seq restart), maps data to topics, nodes and logs.
 - A host device simulator with fault injection (corrupt, truncate, fragment, drop, reset, silence).
 - **Tests:** every case in the brief, plus a libFuzzer target.
 - **Done when:** "sensor stops" opens a topic-rate incident; a reset becomes an event; bad frames are counted and never crash anything.
 
-**Phase 3: FreeRTOS firmware on a Renode STM32F4, `firmware/` (8–10, highest risk).**
+**Phase 3: FreeRTOS firmware on a Renode STM32F4, `firmware/` (8–10, highest risk). Done (#034):**
+- Done when met: a stalled task leads to a watchdog reset, then a `node_health:mcu2` incident that resolves, scripted (`firmware/tests/firmware_e2e.py`).
+- Deviations:
+  - The reset cause comes from a boot record, because Renode doesn't model `RCC_CSR`.
+  - The gateway holds a reset device DEGRADED for 20 s, so the brief reset becomes an incident.
+  - The task logic is host-tested directly instead of under the POSIX port.
 - Tasks: sensor (periodic sampling into a bounded queue); comms (a slow link can't block sampling); health (stack high-water marks); watchdog (a stalled task leads to a reset).
 - Same protocol library built for Cortex-M4; the UART goes to the agent over TCP. The task logic also builds against the POSIX port for unit tests. GDB via Renode.
 - **Done when:** a stalled task causes a watchdog reset, which OpenFleet shows as an incident that then recovers. Scripted and repeatable.
 
-**Phase 4: regression tier + benchmarks (4–5).**
+**Phase 4: regression tier + benchmarks (4–5). Done (#035; [BENCHMARKS.md](BENCHMARKS.md)):**
+- Done as planned: a YAML scenario runner that measures on the server clock and gates on `redetect` (5 scenarios); an 8-test Robot Framework suite on Renode in emulated time; `edge_bench`; a nightly workflow with one labelled report.
+- Found on the first scenario run: BUG-007 (a restarted backend blamed robots for its own outage), fixed.
+- Not done: the optional full-system QEMU (Debian arm64 + systemd).
 - Scenario runner; Renode Robot Framework tests; a nightly CI job that writes a report.
 - Benchmarks: parser throughput and per-frame cost, agent RSS/CPU, end-to-end detection latency, reconnect time. Each figure is tagged native / QEMU / Renode.
 - Optional: Debian arm64 in `qemu-system-aarch64` with the agent as a systemd service.

@@ -1,0 +1,45 @@
+name: device_link_reconnect
+description: the device link drops -> device node STOPPED + incident -> link back -> reconnect time
+profiles: [edge]
+services: [device-sim, edge-agent, edge-worker]
+env: simulated device (openfleet-device-sim, a host process)
+steps:
+  - expect: {node: mcu1, state: RUNNING}
+    timeout: 60
+  - expect: {topic: /mcu1/imu, status: HEALTHY}
+    timeout: 30
+  - mark: drop
+    compose: [stop, device-sim]
+  - expect: {log: "device link tcp://device-sim:4000 lost"}
+    measure: {name: link_loss_logged_s, from: drop, max_s: 10,
+              what: "device process stopped -> link loss reported as a log event"}
+  - expect: {node: mcu1, state: STOPPED}
+    measure: {name: silent_device_stopped_s, from: drop, max_s: 15,
+              what: "device gone -> node mcu1 STOPPED (3 s silence timeout + 1 s sampling)"}
+  - expect: {incident: "node_health:mcu1", open: true}
+    measure: {name: detection_s, from: drop, max_s: 15,
+              what: "device gone -> node_health:mcu1 incident opened"}
+  - compose: [start, device-sim]
+  - mark: back
+  - expect: {log: "device link tcp://device-sim:4000 connected"}
+    since: back
+    timeout: 30
+    measure: {name: reconnect_s, from: back, max_s: 15,
+              what: "device listening again -> gateway reconnected (agent backoff, <= 10 s)"}
+  - expect: {topic: /mcu1/imu, status: HEALTHY}
+    since: back
+    measure: {name: data_flowing_again_s, from: back, max_s: 15,
+              what: "device listening again -> /mcu1/imu HEALTHY on the dashboard"}
+  # The restarted device-sim is a new boot whose HELLO went out before the link was up: a
+  # reset of unknown cause, so the gateway holds mcu1 DEGRADED for 20 s (DECISIONS #034).
+  - expect: {log: "mcu1 reset detected"}
+    since: back
+  - expect: {node: mcu1, state: RUNNING}
+    since: back
+    timeout: 40
+    measure: {name: device_running_again_s, from: back, max_s: 35,
+              what: "device listening again -> node mcu1 RUNNING (includes the 20 s reset hold)"}
+  - expect: {incident: "node_health:mcu1", open: false}
+    since: back
+    timeout: 45
+redetect: {caught_min: 1, missed_max: 0}

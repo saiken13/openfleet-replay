@@ -145,6 +145,41 @@ Simulator / collector (1 batch per robot per ~1s)
 → 200 {accepted: true, duplicate: false}
 ```
 
+## 1a. C++ edge agent → telemetry ingest (DECISIONS #032)
+Robot side, in `edge/` (a separate process; it calls the same endpoints as the collector):
+1. `main` (`src/main.cpp`) → `parse_args` (`src/agent.cpp`; key only from `OPENFLEET_API_KEY`) → `run_agent`. It blocks SIGTERM/SIGINT in every thread, then starts three threads.
+2. **Sampler thread:** `sampler_loop` → `Sampler::sample` (`src/sampler.cpp`), which reads `/proc/stat`, `/proc/meminfo` and `/proc/<pid>/stat` through the pure parsers in `src/proc.cpp` (`parse_cpu_times`/`cpu_pct`, `mem_pct`, `parse_pid_stat`/`process_state`). It then calls `BoundedQueue<Sample>::push` (drop-oldest, never blocks).
+3. **Uplink thread:** `uplink_loop`. The queue's `pop_for(backoff)` is also its sleep.
+   - `Uplink::start` (`src/uplink.cpp`): `PUT /api/v1/robots/{id}`, then `PUT /api/v1/runs/{uuid}` (§0b, §0c).
+   - `Uplink::enqueue`: adds node `edge_agent`, then `batch_json` (`src/telemetry.cpp`) into the outbox with the next seq.
+   - `Uplink::pump`: `POST /api/v1/runs/{id}/telemetry` (§1) through `CurlClient::send` (`src/curl_client.cpp`).
+     - 2xx: pop the batch and record the latency.
+     - Transport error, 5xx, 401/403: keep it and `Backoff::next`.
+     - 404/409: `drop_run`, then `start` again.
+     - Other 4xx: drop the batch.
+4. **Signal thread:** `sigtimedwait` → `StopSignal::request`. Then the sampler is joined and the queue closed. The uplink drains it, flushes for ≤ 5 s, and calls `Uplink::end(ABORTED)` (`POST /runs/{id}/end`, §0c).
+
+Server side, nothing is specific to the agent: processes are nodes (`NodeHealthRule`), CPU and memory are metrics (`HighCpuRule`, `HighMemoryRule`), and silence is liveness (§2).
+
+## 1b. Device → gateway → telemetry (DECISIONS #033, [PROTOCOL.md](PROTOCOL.md))
+1. **Device:** `DeviceSim::tick` (`edge/src/device_sim.cpp`; Phase 3: the firmware) → `ofp_build_*` + `ofp_encode` (`protocol/src/protocol.c`) → bytes on TCP or a UART.
+2. **Device thread:** `device_loop` (`edge/src/device_link.cpp`): `open_device`, then `pump_fd` (`poll` + `read`), then `Gateway::on_bytes` (`edge/src/gateway.cpp`).
+   - `ofp_decoder_push` judges each frame at its `0x00`: errors go to `count_error`, frames to `handle`.
+   - `handle` detects resets (HELLO, `boot_id`, uptime), runs `check_seq` (duplicate, stale or lost), then parses: SENSOR counts per sensor; DESCRIBE sets names and expected rates; HEALTH sets task states (low stack → log); LOG → log.
+   - A dropped link goes to `Gateway::on_link`, and the link is reopened with backoff.
+3. **Sampler thread:** each period `sampler_loop` calls `enrich`, which calls `Gateway::contribute`. That adds topics `/mcu<id>/<sensor>` (rate over the window), nodes `mcu<id>` (STOPPED / DEGRADED / RUNNING) and `mcu<id>/<task>`, and the window's logs (plus a rate-limited link-error summary) to the `Sample`.
+4. From there it's §1a: `Uplink::enqueue` → `batch_json` (topics included) → `POST /runs/{id}/telemetry`. The backend's `TopicRateRule` and `NodeHealthRule` judge it like any robot's data.
+
+## 1c. Firmware → watchdog reset → incident (DECISIONS #034, [FIRMWARE.md](FIRMWARE.md))
+1. **Boot:** `Reset_Handler` (`firmware/board/stm32f4/startup.c`) → `main` (`firmware/src/main.c`) → `board_init` → `boot_record_on_boot` (`firmware/app/boot_record.c`), which gives the reason and boot id → four static tasks → `vTaskStartScheduler`.
+2. **Normal running:**
+   - `sensor_task`: `sup_checkin` → `post` (data queue; dropped if full).
+   - `comms_task`: control queue, then data queue → `send_frame` → `ofp_encode` → `board_uart_write` (USART2 → Renode → TCP 3456).
+   - `health_task`: HEALTH (with `uxTaskGetStackHighWaterMark`) and DESCRIBE.
+   - `watchdog_task`: `sup_may_kick` (`firmware/app/supervisor.c`) → `board_watchdog_kick`.
+3. **A task stalls:** `sup_may_kick` latches false → `boot_record_note_watchdog` + `post_log` ("stopped checking in") → no more kicks → the IWDG resets the MCU → Renode's `reset` macro reloads the image, keeping SRAM → step 1, where `boot_record_on_boot` reports a watchdog reset and the stalled task.
+4. **Gateway** (§1b), `Gateway::handle`: HELLO from a known device → `reset()`, which logs `mcu2 reset (watchdog)` and sets `degraded_until = now + reset_hold`. Then `contribute` reports node `mcu2` DEGRADED until then, `NodeHealthRule` opens `node_health:mcu2`, and the reconciler resolves it after the hold.
+
 ## 2. Heartbeat and liveness
 
 ```
@@ -164,6 +199,8 @@ Sweeper (every SWEEP_INTERVAL_S; started in app lifespan, backend/app/main.py)
 → backend/app/workers/sweeper.py :: Sweeper.tick(now)      (now injectable for tests)
 → backend/app/workers/lock.py :: AdvisoryLock.try_hold()   pg_try_advisory_lock on its own connection;
                                                           not acquired → TickResult(skipped=True) (#024)
+   Sweeper._heard_for(): skipped until this process has listened HEARTBEAT_TIMEOUT_S
+                         (RUN_ABANDON_AFTER_S for aborts) since it started (BUG-007)
 → LivenessService.mark_stale_offline(now)      robots not OFFLINE with last_seen_at < now - HEARTBEAT_TIMEOUT_S
      └─ per robot: lock, Detector.evaluate()  → OFFLINE; heartbeat_missing incident if in a run (#019)
 → LivenessService.abort_abandoned_runs(now)    OFFLINE robots with a current run, silent > RUN_ABANDON_AFTER_S
