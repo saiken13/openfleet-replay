@@ -693,10 +693,39 @@ Both showed up in the first end-to-end demo.
 - Google Benchmark: one more fetched dependency for six cases; a short harness gives exactly the JSON the report needs.
 - A committed benchmark baseline: wrong for any runner other than the machine that made it.
 - Folding the e2e scripts into scenarios: the e2e scripts stay as the per-push CI checks; the scenarios are the measured, slower tier.
-- Full-system QEMU (Debian arm64 with the agent as a systemd service): optional in the roadmap and not done. On an 8 GB Mac it competes with Renode and compose, and the systemd unit is already verified with `systemd-analyze`.
+- Full-system QEMU (Debian arm64 with the agent as a systemd service): optional in the roadmap and not done here. On an 8 GB Mac it competes with Renode and compose, and the systemd unit is already verified with `systemd-analyze`. (Done later: #036.)
 **Tradeoffs:**
-- The nightly workflow has not run on GitHub yet (nor have Phases 1–3's CI jobs).
+- The nightly workflow has not run on GitHub yet (nor have Phases 1–3's CI jobs). (Since run, 2026-11-08: green after fixing GCC 15 false positives.)
 - Scenario latencies include the agent's 1 s sampling period and the backend's 2 s sweeper; they are end-to-end figures for this stack, not component costs.
 - Agent CPU is read from its own `/proc` (utime + stime over wall time); RSS is VmRSS. Under `stress-ng` the agent's share fell (0.26 %), because it competes for the same CPUs; that is a figure for this VM, not a property of the agent.
 - Renode instruction counts are not cycles; the "duty share" assumes 1 instruction per cycle.
 **Date:** 2026-11-07
+
+## 036 — The edge agent under a real systemd: Debian 13 arm64 in qemu-system-aarch64, and a hardened unit
+**Status:** Accepted (2026-11-08). The optional item of [EMBEDDED_ROADMAP](EMBEDDED_ROADMAP.md) Phase 4.
+**Decision:**
+- **Full-system e2e** (`edge/qemu/qemu_e2e.py`, nightly job `qemu-system`): boots a pinned Debian 13 genericcloud arm64 image (by date and SHA-512) in `qemu-system-aarch64`. HVF or KVM on an arm64 host, TCG otherwise (CI's x86_64 runners; `--accel tcg` forces it).
+  - cloud-init's NoCloud seed comes over HTTP from the script (SMBIOS `ds=nocloud;s=http://10.0.2.2:PORT/`), so no ISO tooling is needed. It installs the agent, the unit **byte for byte as shipped** (checked by hash), and a drop-in that only overrides `ExecStart`, as an operator would.
+  - Checks, through SSH and the API: start at boot as a DynamicUser; memory matches the guest's `/proc/meminfo`; a root-owned watched process RUNNING → STOPPED → RUNNING; no capabilities, `NoNewPrivs`, `MemoryMax`; `systemd-analyze security` ≤ 1.5; SIGKILL → `Restart=on-failure` → a new run; `systemctl stop` → ABORTED; reboot → ABORTED during shutdown and a new run after boot; poweroff → ABORTED; no EPERM in the journal.
+  - Writes `qemu-system.json`; the nightly report shows its timings with the environment label.
+- **Guest build** (`edge/qemu/Dockerfile.build`): Debian trixie, so the binary matches the guest's glibc and libcurl. Native on arm64; on x86_64 it cross-compiles with the repo's aarch64 toolchain against multiarch `libcurl4-openssl-dev:arm64` (explicit `CURL_INCLUDE_DIR`/`CURL_LIBRARY`: the toolchain's find root doesn't hold multiarch packages).
+- **Unit hardening** (`edge/packaging/openfleet-edge-agent.service`), found by the first run (exposure 3.4): `PrivateUsers`, `ProtectClock`, `ProtectHostname`, `ProtectKernelLogs`, `RestrictRealtime`, `RestrictSUIDSGID`, `UMask=0077`, `SystemCallFilter=@system-service ~@privileged @resources` with `EPERM`. Exposure 1.2.
+  - Not set, on purpose: `ProtectProc=invisible` (would hide watched processes owned by others), `ProcSubset=pid` (would hide `/proc/stat` and `/proc/meminfo`), `PrivateNetwork`/`IPAddressDeny` (the uplink; addresses are per site).
+  - The unit now documents the drop-in a serial device needs (`PrivateDevices=no`, `DeviceAllow=`, `dialout`): `PrivateDevices=yes` hides `/dev/tty*` from the gateway.
+**Why:**
+- `systemd-analyze verify` only checks syntax. Ordering at shutdown (does the agent flush before the network goes?), restart policy, DynamicUser with `/proc` access, and the syscall filter only show under a booted systemd.
+- A cloud image + cloud-init is how a fleet computer is actually provisioned, and needs no image building (Yocto/Buildroot stay out, per the roadmap).
+- Serving the seed over HTTP keeps the host side to Python + QEMU on both macOS and Linux.
+**Verified (dev Mac, arm64):**
+- HVF: 7/7 steps PASS. Boot to first run 25.1 s, SIGKILL to new run 6.2 s (`RestartSec=5`), `systemctl stop` 0.1 s, reboot to new run 23.7 s, 5.1 MiB in the service's cgroup.
+- TCG (forced, still on the arm64 host): 7/7 PASS in 3 min. Boot to first run 67.7 s, reboot to new run 52.7 s. x86_64 runners emulate a foreign ISA and will be slower; timeouts scale ×4 under TCG.
+- The cross build's exact commands in an emulated amd64 trixie container; the report section and its failure path with `nightly_report.py`.
+**Alternatives considered:**
+- An ISO seed (`cloud-localds`/`genisoimage`, `hdiutil` on macOS): two code paths and a tool to install, for what an HTTP seed does with the standard library.
+- Building the agent inside the guest: needs a compiler in the image and minutes of TCG compile time.
+- Raising the exposure threshold to 3.4: the score pointed at real, cheap hardening.
+**Tradeoffs:**
+- Not yet run on GitHub's x86_64 runners; the first nightly is the real TCG timing.
+- The EPERM check reads the agent's journal; a syscall that failed silently without logging wouldn't show. The full lifecycle passing is the stronger evidence.
+- The guest is a QEMU `virt` machine, not robot hardware; timings describe that machine.
+**Date:** 2026-11-08

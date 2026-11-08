@@ -7,14 +7,23 @@
 - **Latest commit:** see `git log -1`
 
 ## Current state
-**Pushed and verified on GitHub (2026-11-08).** Commits f9881da (BUG-006/007), fc3dfd5 (embedded Phases 0–4), 63062cb (CI fixes), 432131c (parallel edge e2e).
+**Full-system QEMU done (2026-11-08, DECISIONS #036): the edge agent as a systemd service on Debian 13 arm64 in `qemu-system-aarch64`.** The last open item of the embedded roadmap.
+- **E2E:** `python edge/qemu/qemu_e2e.py` (`--accel tcg` emulates as CI does; `--report FILE`). A pinned cloud image (SHA-512), cloud-init seeded over HTTP from the script (no ISO tools), the shipped unit installed unchanged plus an `ExecStart` drop-in.
+  - 7 steps: boot as a DynamicUser with the guest's /proc; a root-owned watched process (`demo-worker`) RUNNING → STOPPED → RUNNING; hardening (no caps, NoNewPrivs, MemoryMax, exposure ≤ 1.5); SIGKILL → restart → new run; stop → ABORTED; reboot → ABORTED during shutdown + new run at boot; poweroff → ABORTED; no EPERM.
+  - Guest binary: `edge/qemu/Dockerfile.build` (trixie; native on arm64, cross with multiarch libcurl on x86_64).
+- **Unit hardened** (found by the first run, exposure 3.4 → 1.2): PrivateUsers, ProtectClock/Hostname/KernelLogs, RestrictRealtime/SUIDSGID, UMask, a `@system-service` syscall filter. The unit's header documents the drop-in a serial device needs (`PrivateDevices=yes` hides `/dev/tty*`).
+- **Nightly:** new job `qemu-system` (TCG on the x86_64 runner, image cached); the report has a section for it and fails if it fails. New demo key `edge-vm-01`.
+- **Verified locally (M2):** HVF 7/7 (boot → first run 25 s, reboot → new run 24 s); TCG 7/7 in 3 min; the cross build's commands in an emulated amd64 container; the report and its failure path. **Not yet run on GitHub**: trigger a manual Nightly and watch `qemu-system` (TCG on x86 is the slow path).
+- **Next:** nothing planned; see "Recommended next task" for the owner's options.
+
+**Earlier: pushed and verified on GitHub (2026-11-08).** Commits f9881da (BUG-006/007), fc3dfd5 (embedded Phases 0–4), 63062cb (CI fixes), 432131c (parallel edge e2e).
 - **CI: all green on GitHub** (63062cb and 432131c), every embedded job included.
-- **Nightly (manual runs):** on fc3dfd5, firmware, scenarios and fuzz passed; bench failed (below), so `report` failed by design. On 63062cb, bench and firmware passed; scenarios and fuzz were still running at handoff. Check: `gh run view 42510262373`.
+- **Nightly (manual runs):** on fc3dfd5, firmware, scenarios and fuzz passed; bench failed (below), so `report` failed by design. On 63062cb, every job passed, report included (run 42510262373).
 - **Runner differences fixed:**
   - `ubuntu-latest` ships **GCC 15** (dev container: GCC 13). At `-O2 -Werror` it false-positives `-Wuninitialized` in `BoundedQueue::pop_for` (moving `optional<Sample>`) and `-Warray-bounds` on `push_back` after a sized vector in `DeviceSim` (`oversize`). Code restructured, not silenced. Reproduce locally with the `gcc:15` Docker image.
   - `scripts/multi_replica_e2e.py` assumed amr-02..04 existed; it now registers them (idempotent PUT), so it works on CI's fresh DB.
 - **CI time 13 → 5.5 min:** `edge-agent-e2e` is a 3-script matrix needing only `backend` (it waited for `edge` + `firmware`, then ran ~7.3 min serially). The longest job is now `edge` (~5.5 min).
-- **Next:** nothing planned. Owner's choice from "Recommended next task" (my suggestion: the full-system QEMU + systemd check).
+- Full-system QEMU followed (above).
 
 **Earlier: Embedded Phase 4 done (2026-11-07, DECISIONS #035; [docs/BENCHMARKS.md](docs/BENCHMARKS.md)): regression tier + benchmarks. Every embedded phase is complete.**
 - **Scenario runner:** `edge/e2e/run_scenarios.py` runs the YAML files in `edge/e2e/scenarios/`: `device_sensor_stops`, `device_link_reconnect`, `backend_outage`, `agent_footprint` and `firmware_watchdog`.
@@ -287,7 +296,7 @@ scripts/edge-dev.sh bash -c 'cmake --preset fuzz && cmake --build --preset fuzz'
 
 **Embedded expansion** ([docs/EMBEDDED_ROADMAP.md](docs/EMBEDDED_ROADMAP.md)): Phases 0–4 are done. Left over, each needing the owner's go:
 - ~~Push and watch `CI` and a manual `Nightly` on GitHub.~~ Done 2026-11-08 (see Current state).
-- The optional full-system QEMU (Debian arm64 + the agent as a systemd service).
+- ~~The optional full-system QEMU (Debian arm64 + the agent as a systemd service).~~ Done 2026-11-08 (#036).
 - Postponed from the roadmap: ROS 2 integration (the agent republishes MCU data as ROS topics).
 
 **Not in the batch: these need the owner's decisions first.**

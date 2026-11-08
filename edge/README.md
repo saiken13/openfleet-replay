@@ -48,7 +48,14 @@ openfleet-device-sim --listen 4000           # a simulated MCU to point --device
 openfleet-edge-agent --help         # every option
 ```
 
-`packaging/openfleet-edge-agent.service` is a hardened systemd unit. It passes `systemd-analyze verify` in the dev container but has not run under a real systemd boot.
+`packaging/openfleet-edge-agent.service` is a hardened systemd unit (`systemd-analyze security` exposure 1.2). Customise it with a drop-in, not by editing it: `systemctl edit openfleet-edge-agent`, then override `ExecStart` (robot id, API URL, `--process`). A serial device also needs `PrivateDevices=no`, `DeviceAllow=` and the `dialout` group (see the unit's header).
+
+`qemu/qemu_e2e.py` runs it under a real systemd boot: Debian 13 arm64 in `qemu-system-aarch64`, provisioned by cloud-init, through start at boot, a crash restart, stop, reboot and poweroff (DECISIONS #036). Needs QEMU with an aarch64 UEFI firmware (`brew install qemu`, or `qemu-system-arm qemu-efi-aarch64`), Docker and `pip install httpx`:
+
+```bash
+python edge/qemu/qemu_e2e.py                # HVF/KVM on an arm64 host, ~1.5 min
+python edge/qemu/qemu_e2e.py --accel tcg    # emulated, as on CI's x86_64 runners
+```
 
 ## Build and test
 
@@ -76,6 +83,7 @@ Execution environments, kept distinct:
 - **Native:** the binary runs on the CPU it was built for (the container on an M2 is native arm64 Linux).
 - **Cross + qemu-user:** another architecture's binary, run by user-mode emulation. This proves the cross build and the code are correct, not anything about timing.
 - **Container on the compose stack:** the e2e. The "robot computer" is a container; its CPU and memory figures are the Docker VM's.
+- **Full system (QEMU):** a whole emulated arm64 computer booting Debian with systemd (`qemu/`). Accelerated (HVF/KVM) on an arm64 host, emulated (TCG) elsewhere.
 - **Renode:** a whole emulated microcontroller (`../firmware/renode/smoke.sh` boots an STM32F4 and reads its UART over TCP).
 
 ## Layout
@@ -96,4 +104,4 @@ Execution environments, kept distinct:
 - `e2e/e2e.py`, `e2e/device_e2e.py`: drive the compose `edge` profile. `e2e/run_scenarios.py` + `e2e/scenarios/*.yaml`: the measured regression tier.
 - `bench/`: micro-benchmarks (`edge_bench`).
 - `docker/`: `Dockerfile.dev` (toolchain) and `Dockerfile.agent` (the agent image).
-- `packaging/`: the systemd unit. `cmake/toolchains/`: the cross toolchain files.
+- `packaging/`: the systemd unit. `qemu/`: the full-system e2e and the guest's build. `cmake/toolchains/`: the cross toolchain files.

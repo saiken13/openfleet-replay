@@ -8,9 +8,9 @@
 | Tier | What | Where | Gate |
 |---|---|---|---|
 | Every push (`ci.yml`) | unit tests on every preset (incl. `edge_bench --quick`), sanitizers, 45 s fuzzing, the e2e scripts, the Robot suite | GitHub runner | any failure |
-| Nightly (`nightly.yml`, 03:17 UTC, or *Run workflow*) | benchmarks, the Robot suite, every scenario, 10 min fuzzing per target, one report | GitHub runner | tests, scenarios and fuzzing; benchmarks are reported, not gated |
+| Nightly (`nightly.yml`, 03:17 UTC, or *Run workflow*) | benchmarks, the Robot suite, every scenario, 10 min fuzzing per target, the agent under systemd in QEMU, one report | GitHub runner | tests, scenarios, fuzzing and the QEMU run; benchmarks are reported, not gated |
 
-The nightly report is the job summary of the run and the artifact `nightly-report` (Markdown + JSON). Raw results stay as artifacts: `bench`, `robot` (Robot `report.html`/`log.html`), `scenarios`.
+The nightly report is the job summary of the run and the artifact `nightly-report` (Markdown + JSON). Raw results stay as artifacts: `bench`, `robot` (Robot `report.html`/`log.html`), `scenarios`, `qemu-system` (JSON, guest console, the agent's journal, `systemd-analyze security`).
 
 ## Environments (the labels)
 
@@ -20,6 +20,7 @@ The nightly report is the job summary of the run and the artifact `nightly-repor
 | `qemu-user` | A cross-compiled binary under user-mode qemu. The figure describes the emulator. |
 | `renode` | Renode's STM32F4 model. Not cycle-accurate: instruction counts, not cycles; emulated time, not wall time. |
 | compose | The real backend, Postgres and agent in Docker on one VM, with a simulated (device-sim) or emulated (Renode) device. |
+| QEMU full system | Debian 13 arm64 in `qemu-system-aarch64`, labelled HVF/KVM-accelerated or emulated (TCG). Boot and restart times describe that virtual machine. |
 
 Figures are compared only within one label and architecture.
 
@@ -39,6 +40,9 @@ scripts/edge-dev.sh bash -c 'cd /src && cmake -S firmware -B firmware/build -G N
 # Scenarios against compose (pip install httpx pyyaml)
 python edge/e2e/run_scenarios.py --list
 python edge/e2e/run_scenarios.py                 # all; reports in edge/build/scenarios/
+
+# The agent as a systemd service on Debian arm64 in QEMU (needs qemu + aarch64 UEFI firmware)
+python edge/qemu/qemu_e2e.py --report edge/build/qemu/qemu-system.json
 
 # One report from any of the above
 python scripts/nightly_report.py edge/build -o report.md
@@ -97,6 +101,20 @@ Dev Mac, compose, agent native aarch64 in a container, 2026-11-07:
 
 These are end-to-end latencies for this stack: they include the agent's 1 s sampling period, the backend's 2 s sweeper and the incident hysteresis. They are what an operator sees, not the cost of one component.
 
-## Not done
-- **Full-system QEMU** (Debian arm64 with the agent as a systemd service) was optional in the roadmap and is not built; the unit file is verified with `systemd-analyze verify` only.
-- **Neither workflow has run on GitHub yet.**
+## Full system: the agent under systemd (`edge/qemu/qemu_e2e.py`, DECISIONS #036)
+
+Measured on the dev Mac (arm64), wall clock:
+
+| | HVF-accelerated | emulated (TCG, arm64 host) |
+|---|---:|---:|
+| boot to the agent's first run | 25.1 s | 67.7 s |
+| SIGKILL to the restarted agent's new run | 6.2 s | 6.2 s |
+| `systemctl stop` (flush, run ABORTED) | 0.1 s | 0.8 s |
+| reboot to the new run | 23.7 s | 52.7 s |
+| memory in the service's cgroup | 5.1 MiB | 5.1 MiB |
+| `systemd-analyze security` exposure | 1.2 | 1.2 |
+
+The restart figure is mostly `RestartSec=5`. CI's x86_64 runners emulate a foreign ISA, so their TCG figures will be slower; compare a nightly only with earlier nightlies.
+
+## Verified on GitHub
+Both workflows ran on GitHub on 2026-11-08. The first runs failed only on GCC 15 false positives (`ubuntu-latest` ships GCC 15; the dev container GCC 13) and a test that assumed a dev database; both fixed. The `qemu-system` job has not run there yet.

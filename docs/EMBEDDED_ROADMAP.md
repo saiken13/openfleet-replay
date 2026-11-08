@@ -1,6 +1,6 @@
 # Embedded & Embedded Linux expansion — roadmap
 
-**Status:** Approved by the owner (2026-11-07). **Phase 0 done** (DECISIONS #031). **Phase 1 done** (#032). **Phase 2 done** (#033). **Phase 3 done** (#034). **Phase 4 done** (#035). Every phase is complete; the optional full-system QEMU item was not built.
+**Status:** Approved by the owner (2026-11-07). **Phase 0 done** (DECISIONS #031). **Phase 1 done** (#032). **Phase 2 done** (#033). **Phase 3 done** (#034). **Phase 4 done** (#035). Every phase is complete, including the optional full-system QEMU item (#036).
 **Hard constraint:** no physical hardware. Everything is native, cross-compiled + emulated, or simulated, and every claim and measurement says which.
 
 ## Facts that shaped the plan
@@ -17,7 +17,7 @@
 | 2 + 4. MCU firmware + FreeRTOS | **Merged**, Phase 3: one FreeRTOS firmware on a Renode STM32F4 |
 | 6. Fault injection | Inside each phase; only embedded-specific faults (CPU/mem/network are already in the Python simulator) |
 | 7. Regression workflow | Inside phases + a slow nightly CI tier; reuses `openfleet check` / `redetect` |
-| 8. Deployment/debugging | Sanitizers + systemd unit (Phase 1), firmware GDB via Renode (Phase 3); full-system QEMU optional |
+| 8. Deployment/debugging | Sanitizers + systemd unit (Phase 1), firmware GDB via Renode (Phase 3); full-system QEMU (#036) |
 | 9. Performance | Phase 4, measured and labelled by environment |
 | 5. ROS 2 integration | **Postponed.** Later: the agent republishes MCU data as ROS topics, so the existing collector monitors them |
 
@@ -58,7 +58,7 @@
 **Phase 4: regression tier + benchmarks (4–5). Done (#035; [BENCHMARKS.md](BENCHMARKS.md)):**
 - Done as planned: a YAML scenario runner that measures on the server clock and gates on `redetect` (5 scenarios); an 8-test Robot Framework suite on Renode in emulated time; `edge_bench`; a nightly workflow with one labelled report.
 - Found on the first scenario run: BUG-007 (a restarted backend blamed robots for its own outage), fixed.
-- Not done: the optional full-system QEMU (Debian arm64 + systemd).
+- Done later (#036): the optional full-system QEMU. Debian 13 arm64 in `qemu-system-aarch64` with the agent as a systemd service; it found the unit's hardening gaps (exposure 3.4 → 1.2).
 - Scenario runner; Renode Robot Framework tests; a nightly CI job that writes a report.
 - Benchmarks: parser throughput and per-frame cost, agent RSS/CPU, end-to-end detection latency, reconnect time. Each figure is tagged native / QEMU / Renode.
 - Optional: Debian arm64 in `qemu-system-aarch64` with the agent as a systemd service.

@@ -9,5 +9,6 @@
   "amr-08": "ofk_demo_amr-08_public-not-secret",
   "ci-01": "ofk_demo_ci-01_public-not-secret",
   "edge-01": "ofk_demo_edge-01_public-not-secret",
+  "edge-vm-01": "ofk_demo_edge-vm-01_public-not-secret",
   "ros-test-01": "ofk_demo_ros-test-01_public-not-secret"
 }

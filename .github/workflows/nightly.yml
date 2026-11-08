@@ -7,7 +7,8 @@
 # kind of runner and flagged when much slower, but shared runners are too noisy to gate on.
 #
 # Environments, as labelled in the report: native x86_64 (the runner VM), qemu-user aarch64
-# (emulated user-mode), Renode STM32F4 (emulated MCU), compose on the runner VM. No hardware.
+# (emulated user-mode), Renode STM32F4 (emulated MCU), compose on the runner VM, and Debian
+# arm64 in qemu-system-aarch64 (emulated full system, TCG). No hardware.
 name: Nightly
 
 on:
@@ -125,9 +126,40 @@ jobs:
           name: fuzz-crashes
           path: edge/build/fuzz/crashes/
 
+  # The edge agent as a systemd service on Debian 13 arm64 in qemu-system-aarch64 (DECISIONS
+  # #036): boot, a root-owned watched process, hardening, crash restart, stop, reboot,
+  # poweroff. Emulated (TCG) on the x86_64 runner, so its timeouts are scaled.
+  qemu-system:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-arm qemu-efi-aarch64 qemu-utils
+      - run: pip install httpx
+      # The pinned cloud image (~340 MB); the script verifies its SHA-512 either way.
+      - uses: actions/cache@v4
+        with:
+          path: edge/build/qemu/debian-13-genericcloud-arm64-20261026-2643.qcow2
+          key: qemu-image-debian-13-genericcloud-arm64-20261026-2643
+      - run: python edge/qemu/qemu_e2e.py --report "$RUNNER_TEMP/qemu/qemu-system.json"
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qemu-system
+          path: |
+            ${{ runner.temp }}/qemu/
+            edge/build/qemu/run-*/console.log
+            edge/build/qemu/run-*/journal*.txt
+            edge/build/qemu/run-*/systemd-security.txt
+
   report:
     runs-on: ubuntu-latest
-    needs: [bench, firmware, scenarios, fuzz]
+    needs: [bench, firmware, scenarios, fuzz, qemu-system]
     if: always()
     steps:
       - uses: actions/checkout@v4
@@ -147,7 +179,7 @@ jobs:
           {
             cat nightly-report.md
             echo
-            echo "Jobs: bench ${{ needs.bench.result }}, firmware ${{ needs.firmware.result }}, scenarios ${{ needs.scenarios.result }}, fuzz ${{ needs.fuzz.result }}."
+            echo "Jobs: bench ${{ needs.bench.result }}, firmware ${{ needs.firmware.result }}, scenarios ${{ needs.scenarios.result }}, fuzz ${{ needs.fuzz.result }}, qemu-system ${{ needs.qemu-system.result }}."
           } >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         with:
@@ -167,5 +199,5 @@ jobs:
         if: >-
           env.REPORT_FAILED == '1' || needs.firmware.result != 'success' ||
           needs.scenarios.result != 'success' || needs.fuzz.result != 'success' ||
-          needs.bench.result != 'success'
+          needs.bench.result != 'success' || needs.qemu-system.result != 'success'
         run: exit 1

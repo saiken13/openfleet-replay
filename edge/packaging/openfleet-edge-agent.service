@@ -4,8 +4,15 @@
 #   install -m600 /dev/null /etc/openfleet/edge-agent.env   # then add OPENFLEET_API_KEY=...
 #   systemctl daemon-reload && systemctl enable --now openfleet-edge-agent
 #
-# Checked with `systemd-analyze verify` in the dev container; not run under a real systemd
-# boot (see edge/README.md).
+# Run under a real systemd boot by edge/qemu/qemu_e2e.py (Debian 13 arm64 in QEMU): start at
+# boot, crash restart, stop, reboot and poweroff, and the hardening below
+# (`systemd-analyze security`: 1.2; 3.4 without the second block, DECISIONS #036).
+#
+# Serial devices (--device serial:/dev/ttyUSB0): PrivateDevices hides /dev, so add a drop-in
+#   [Service]
+#   PrivateDevices=no
+#   DeviceAllow=/dev/ttyUSB0 rw
+#   SupplementaryGroups=dialout
 [Unit]
 Description=OpenFleet edge agent
 Wants=network-online.target
@@ -39,6 +46,18 @@ MemoryDenyWriteExecute=yes
 SystemCallArchitectures=native
 CapabilityBoundingSet=
 MemoryMax=64M
+# It reads /proc/stat, /proc/meminfo and /proc/<pid>/stat of every process (world-readable),
+# so ProtectProc=invisible and ProcSubset=pid would break it; PrivateUsers doesn't.
+PrivateUsers=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+UMask=0077
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+SystemCallErrorNumber=EPERM
 
 [Install]
 WantedBy=multi-user.target

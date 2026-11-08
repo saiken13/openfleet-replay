@@ -4,6 +4,7 @@
     run_scenarios.py           scenarios/*.json         edge scenarios against compose
     firmware.robot             firmware-metrics.json    Renode figures
                                robot_output.xml         Robot Framework results
+    edge/qemu/qemu_e2e.py      qemu-system.json         the agent under systemd, Debian in QEMU
 
     python scripts/nightly_report.py ARTIFACTS_DIR [-o report.md] [--json report.json]
                                      [--baseline PREVIOUS_RESULTS_DIR]
@@ -72,13 +73,15 @@ def build(root: Path, baseline: list[dict], exclude: Path | None = None) -> tupl
     scenarios = [s for s in load_json(sorted(root.rglob("scenarios/*.json"))) if "scenario" in s]
     firmware = load_json(sorted(root.rglob("firmware-metrics.json")))
     robot = robot_results(sorted(root.rglob("robot_output.xml")))
+    qemu = load_json(sorted(root.rglob("qemu-system.json")))
     base = {bench_key(b): {r["name"]: r for r in b["results"]} for b in baseline}
 
     failures: list[str] = []
     md: list[str] = ["# OpenFleet nightly report", ""]
     md.append(
         "Every figure is labelled with where it was measured. Emulated figures (qemu-user, "
-        "Renode) describe the emulator, not a CPU; nothing here ran on robot hardware."
+        "QEMU full system, Renode) describe the emulator, not a CPU; nothing here ran on robot "
+        "hardware."
     )
     md.append("")
 
@@ -92,6 +95,11 @@ def build(root: Path, baseline: list[dict], exclude: Path | None = None) -> tupl
         bad_s = [s for s in scenarios if not s["passed"]]
         md.append(f"| edge scenarios (compose) | {len(scenarios) - len(bad_s)} | {len(bad_s)} |")
         failures += [f"scenario {s['scenario']}: {s.get('error', '')}" for s in bad_s]
+    for q in qemu:
+        ok = bool(q.get("passed"))
+        md.append(f"| edge agent under systemd (QEMU) | {int(ok)} | {int(not ok)} |")
+        if not ok:
+            failures.append(f"qemu-system: {q.get('error', '')}")
     md.append("")
     if failures:
         md += ["**Failures**", ""] + [f"- {f}" for f in failures] + [""]
@@ -175,9 +183,30 @@ def build(root: Path, baseline: list[dict], exclude: Path | None = None) -> tupl
                 )
         md.append("")
 
+    # --- full system (QEMU) -------------------------------------------------------------
+    for q in qemu:
+        md += [
+            "## Edge agent under systemd (Debian arm64 in QEMU)",
+            "",
+            (
+                f"_{q.get('environment') or 'environment unknown'}; image {q.get('image', '')}. "
+                "Timings are wall-clock on that machine._"
+            ),
+            "",
+            "| metric | value |",
+            "|---|---:|",
+        ]
+        for name, value in q.get("timings_s", {}).items():
+            md.append(f"| {name} | {value} s |")
+        if "systemd_exposure" in q:
+            md.append(f"| systemd-analyze security exposure | {q['systemd_exposure']} |")
+        if "memory_current_bytes" in q:
+            md.append(f"| service memory (cgroup) | {q['memory_current_bytes'] / 1024:,.0f} KiB |")
+        md.append("")
+
     if flagged:
         md += ["## Flagged (informational)", ""] + [f"- {f}" for f in flagged] + [""]
-    if not (benches or scenarios or firmware or robot):
+    if not (benches or scenarios or firmware or robot or qemu):
         md.append("_No results found._")
         failures.append("no results found")
 
@@ -188,6 +217,7 @@ def build(root: Path, baseline: list[dict], exclude: Path | None = None) -> tupl
         "firmware": firmware,
         "scenarios": scenarios,
         "robot": robot,
+        "qemu": qemu,
     }
     return "\n".join(md) + "\n", summary
 

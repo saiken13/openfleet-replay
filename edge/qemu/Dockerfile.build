@@ -1,0 +1,40 @@
+# The edge agent for the QEMU guest (Debian 13 "trixie", arm64), built against trixie's own
+# glibc and libcurl so the binary runs on the guest unchanged. Output: the binary only.
+#
+#   docker buildx build -f edge/qemu/Dockerfile.build --output type=local,dest=edge/build/qemu/bin .
+#
+# Native on an arm64 host (Apple Silicon); cross-compiled with Debian multiarch on x86_64 (CI).
+FROM --platform=$BUILDPLATFORM debian:trixie AS build
+ARG BUILDARCH
+ENV DEBIAN_FRONTEND=noninteractive
+RUN set -eux; \
+    if [ "$BUILDARCH" = arm64 ]; then \
+        pkgs="g++ libcurl4-openssl-dev"; \
+    else \
+        dpkg --add-architecture arm64; \
+        pkgs="g++-aarch64-linux-gnu libcurl4-openssl-dev:arm64"; \
+    fi; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends cmake ninja-build ca-certificates $pkgs; \
+    rm -rf /var/lib/apt/lists/*
+WORKDIR /src
+COPY protocol protocol
+COPY edge edge
+# Cross: the repo's aarch64 toolchain, pointed at Debian's multiarch libcurl:arm64 (the
+# toolchain's find root, /usr/aarch64-linux-gnu, doesn't hold multiarch packages).
+RUN set -eux; \
+    if [ "$BUILDARCH" = arm64 ]; then cross=""; else \
+        cross="-DCMAKE_TOOLCHAIN_FILE=/src/edge/cmake/toolchains/aarch64-linux-gnu.cmake \
+               -DCURL_INCLUDE_DIR=/usr/include/aarch64-linux-gnu \
+               -DCURL_LIBRARY=/usr/lib/aarch64-linux-gnu/libcurl.so"; \
+    fi; \
+    cmake -S edge -B /build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo $cross \
+        -DEDGE_BUILD_TESTS=OFF -DEDGE_BUILD_BENCH=OFF -DEDGE_BUILD_AGENT=ON; \
+    cmake --build /build --target openfleet-edge-agent; \
+    strip=strip; [ "$BUILDARCH" = arm64 ] || strip=aarch64-linux-gnu-strip; \
+    install -D -m755 /build/openfleet-edge-agent /out/openfleet-edge-agent; \
+    "$strip" /out/openfleet-edge-agent; \
+    [ "$(od -An -tx1 -j18 -N2 /out/openfleet-edge-agent | tr -d ' ')" = b700 ]  # ELF machine: aarch64
+
+FROM scratch
+COPY --from=build /out/openfleet-edge-agent /
