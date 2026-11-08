@@ -311,8 +311,10 @@ std::optional<std::string> DeviceSim::command(std::string_view line, Clock::time
     return std::nullopt;
   }
   if (cmd == "oversize") {
-    std::vector<std::uint8_t> big(OFP_MAX_WIRE * 2, 0x5A);  // no delimiter for too long
-    big.push_back(0);
+    // No delimiter for too long, then one. Sized up front: GCC 15 false-positives
+    // -Warray-bounds on a push_back right after the sized constructor.
+    std::vector<std::uint8_t> big(OFP_MAX_WIRE * 2 + 1, 0x5A);
+    big.back() = 0;
     sink(big);
     return std::nullopt;
   }

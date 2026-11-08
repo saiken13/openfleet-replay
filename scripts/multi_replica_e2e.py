@@ -62,6 +62,20 @@ async def heartbeat(client: httpx.AsyncClient, http: str, robot: str, marker: st
         raise CheckFailed(f"heartbeat {robot} via {http}: HTTP {r.status_code} {r.text[:200]}")
 
 
+E2E_ROBOTS = ("amr-02", "amr-03", "amr-04")
+
+
+async def register(client: httpx.AsyncClient, http: str, robot: str) -> None:
+    """Idempotent PUT, so the script also works on a fresh database (as in CI)."""
+    r = await client.put(
+        f"{http}/api/v1/robots/{robot}",
+        json={"name": robot.upper(), "model": "AMR-Sim"},  # as the demo simulator registers it
+        headers={"Authorization": f"Bearer {ROBOT_KEYS[robot]}"},
+    )
+    if r.status_code >= 300:
+        raise CheckFailed(f"register {robot} via {http}: HTTP {r.status_code} {r.text[:200]}")
+
+
 async def wait_for(ws: Any, robot: str, marker: str, where: str) -> None:
     try:
         async with asyncio.timeout(TIMEOUT_S):
@@ -154,6 +168,8 @@ async def main() -> int:
     compose = ["docker", "compose", "-f", args.compose_file]
     async with httpx.AsyncClient(timeout=10) as client:
         try:
+            for robot in E2E_ROBOTS:
+                await register(client, args.a, robot)
             print("cross-replica delivery")
             await check_cross_replica(client, args.a, args.b)
             print("load balancer")

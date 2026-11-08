@@ -71,7 +71,9 @@ class BoundedQueue {
     if (count_ == 0) {
       return std::nullopt;  // closed and drained
     }
-    std::optional<T> item = std::move(slots_[head_]);
+    // Move the value, not the optional: GCC 15 at -O2 false-positives -Wuninitialized on
+    // copy-constructing an optional<T> whose T holds vectors.
+    T item = std::move(*slots_[head_]);
     slots_[head_].reset();  // release what the slot held (e.g. a large payload) right away
     head_ = next(head_);
     --count_;
