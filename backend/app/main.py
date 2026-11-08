@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.api.errors import register_error_handlers
 from app.api.v1.router import api_router
 from app.core.config import Settings, get_settings
+from app.core.oidc import OidcClient
 from app.db.engine import build_engine
 from app.db.session import build_sessionmaker
 from app.realtime.bus import RedisBus
@@ -73,6 +74,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.sessionmaker = build_sessionmaker(app.state.engine)
         app.state.hub = Hub()
         app.state.login_throttle = LoginThrottle(settings, settings.redis_url)
+        app.state.oidc = (
+            OidcClient(
+                settings.oidc_issuer,
+                settings.oidc_client_id or "",
+                settings.oidc_client_secret or "",
+                settings.oidc_redirect_url or "",
+            )
+            if settings.oidc_enabled
+            else None
+        )
         await seed_robot_keys(settings, app.state.sessionmaker)
         await seed_users(settings, app.state.sessionmaker)
         app.state.sweeper = Sweeper(
@@ -100,6 +111,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if app.state.bus is not None:
                 await app.state.bus.stop()
             await app.state.login_throttle.close()
+            if app.state.oidc is not None:
+                await app.state.oidc.close()
             await app.state.engine.dispose()
 
     app = FastAPI(

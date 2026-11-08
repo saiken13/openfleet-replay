@@ -9,9 +9,21 @@ export function LoginPage() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [hint, setHint] = useState<string | null>(null);
+  const [sso, setSso] = useState<{ name: string; login_url: string } | null>(null);
 
   useEffect(() => {
-    api.auth.config().then((c) => setHint(c.login_hint), () => {});
+    api.auth.config().then(
+      (c) => {
+        setHint(c.login_hint);
+        setSso(c.oidc);
+      },
+      () => {},
+    );
+    // A refused single sign-on comes back as /login?error=... (DECISIONS #038).
+    const sp = new URLSearchParams(window.location.search);
+    const ssoError = sp.get("error");
+    if (ssoError) setError(`Sign-in failed: ${ssoError}.`);
+    if (window.location.pathname === "/login") window.history.replaceState(null, "", "/");
   }, []);
 
   const submit = async (e: FormEvent) => {
@@ -63,6 +75,19 @@ export function LoginPage() {
         <button className="btn-primary w-full" disabled={busy}>
           {busy ? "Signing in…" : "Sign in"}
         </button>
+        {sso && (
+          <>
+            <div className="flex items-center gap-3 text-xs text-slate-500">
+              <span className="h-px flex-1 bg-slate-800" />
+              or
+              <span className="h-px flex-1 bg-slate-800" />
+            </div>
+            {/* A full navigation: the backend redirects to the provider and back. */}
+            <a href={sso.login_url} className="btn block w-full text-center">
+              Sign in with {sso.name}
+            </a>
+          </>
+        )}
         {hint && <div className="rounded-md bg-slate-800/60 px-3 py-2 text-xs text-slate-400">{hint}</div>}
       </form>
     </div>

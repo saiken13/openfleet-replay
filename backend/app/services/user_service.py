@@ -15,6 +15,7 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import passwords
+from app.core.oidc import Identity, OidcError
 from app.db.models import User, UserToken
 from app.domain.enums import TokenKind, UserRole
 from app.domain.errors import ConflictError, InvalidRequestError, NotFoundError
@@ -27,6 +28,8 @@ API_TOKEN_PREFIX = "ofu_"
 MIN_SEED_TOKEN_LENGTH = 16
 DISPLAY_PREFIX_LENGTH = 12
 _ROLE_RANK = {UserRole.VIEWER: 0, UserRole.OPERATOR: 1}
+# An account that only signs in through OIDC: verify_password never matches it.
+NO_PASSWORD = "!"
 
 
 def has_role(user: User, role: UserRole) -> bool:
@@ -115,6 +118,52 @@ class UserService:
         await self.session.commit()
         return issued
 
+    async def login_oidc(
+        self,
+        identity: Identity,
+        now: datetime,
+        ttl: timedelta,
+        max_age: timedelta,
+        allowed_domains: list[str],
+        default_role: UserRole,
+    ) -> tuple[User, IssuedToken]:
+        """A session for a verified provider identity (DECISIONS #038), or OidcError.
+
+        1. An account already linked to this identity.
+        2. Else an account whose username is the verified email (an invite, e.g.
+           `openfleet users create alice@example.com --sso`): linked now, for good.
+        3. Else, if the email's domain is allowed, a new password-less account.
+        Anything else is refused: an unverified email never matches or creates an account.
+        """
+        user = await self.users.by_oidc_subject(identity.subject)
+        if user is None:
+            email = (identity.email or "").strip().lower()
+            if not email or not identity.email_verified:
+                raise OidcError("your account has no verified email address")
+            try:
+                name = normalize_username(email)
+            except InvalidRequestError as exc:
+                raise OidcError("your email address can't be used as a username") from exc
+            user = await self.users.by_username(name)
+            if user is not None:
+                if user.oidc_subject not in (None, identity.subject):
+                    raise OidcError(f"{name} is linked to a different sign-in account")
+            elif email.rsplit("@", 1)[-1] in allowed_domains:
+                user = await self.users.insert_if_absent(name, NO_PASSWORD, default_role)
+                if user is None:  # created concurrently
+                    user = await self.users.by_username(name)
+                    assert user is not None
+            else:
+                raise OidcError(f"{name} has no access; ask an administrator to add you")
+            user.oidc_subject = identity.subject
+        if user.disabled_at is not None:
+            raise OidcError(f"{user.username} is disabled")
+        issued = await self._issue(
+            user, TokenKind.SESSION, SESSION_PREFIX, None, now + ttl, now + max(max_age, ttl)
+        )
+        await self.session.commit()
+        return user, issued
+
     async def logout(self, token: str, now: datetime) -> None:
         """Revoke a session token. API tokens are revoked explicitly, never by a logout."""
         row = await self.users.token_by_hash(hash_token(token))
@@ -124,10 +173,17 @@ class UserService:
 
     # --- management (openfleet users ...) ------------------------------------------------
 
-    async def create(self, username: str, password: str, role: UserRole) -> User:
+    async def create(self, username: str, password: str | None, role: UserRole) -> User:
+        """`password=None`: an account that only signs in with OIDC (its username is the
+        email the provider verifies)."""
         name = normalize_username(username)
-        _check_password(password)
-        digest = await asyncio.to_thread(passwords.hash_password, password)
+        if password is None:
+            if "@" not in name:
+                raise InvalidRequestError("an SSO-only user's username must be their email")
+            digest = NO_PASSWORD
+        else:
+            _check_password(password)
+            digest = await asyncio.to_thread(passwords.hash_password, password)
         user = await self.users.insert_if_absent(name, digest, role)
         if user is None:
             raise ConflictError(f"user {name!r} already exists")

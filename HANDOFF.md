@@ -7,7 +7,13 @@
 - **Latest commit:** see `git log -1`
 
 ## Current state
-**ROS 2 integration done (2026-11-08, DECISIONS #037): `openfleet-ros-bridge` republishes microcontrollers into ROS 2; the collector reads `/diagnostics`.** The item the embedded roadmap had postponed.
+**Owner's decisions (2026-11-08): Google sign-in; multi-tenancy as low-scale "sites" (shared DB); scale infrastructure skipped (documented evolution path only). Goal: finish quickly for the owner's resume.**
+
+**Sign in with Google done (2026-11-08, DECISIONS #038).** OIDC code flow + PKCE run by the backend (`app/core/oidc.py`), `GET /auth/oidc/login|callback`, migration 0009 (`users.oidc_subject`). Access: linked identity → invite (`openfleet users create EMAIL --sso`) → `OIDC_ALLOWED_DOMAINS` (viewer) → refused. Login page shows "Sign in with Google" when configured and the refusal message. Compose reads `OPENFLEET_OIDC_*` from `.env` (`.env.example`). Tests: `tests/test_oidc.py` (16, fake provider with real RS256); backend 269 pass. Live: redirect to accounts.google.com verified with a placeholder client; **a real Google sign-in needs the owner's OAuth client id/secret.**
+- **QEMU on GitHub fixed:** `-cpu neoverse-n1` (Ubuntu's edk2 hangs under `-cpu max`); `qemu-system` passes on the x86 runner (boot → first run 74 s).
+- **Next: multi-tenancy as sites** (in progress), then final docs/README polish.
+
+**Earlier: ROS 2 integration done (2026-11-08, DECISIONS #037): `openfleet-ros-bridge` republishes microcontrollers into ROS 2; the collector reads `/diagnostics`.** The item the embedded roadmap had postponed.
 - **Bridge** (`edge/ros/`, ament_cmake, image `edge/ros/Dockerfile` on Jazzy; `-p devices:=[URI,...]`): the edge gateway per link. Readings → `std_msgs/Int32` on `/mcu<id>/<sensor>`; device/task health → `/diagnostics`; resets and device logs → `/rosout`. It never talks to OpenFleet (the collector is the robot's one sender).
   - Gateway additions: `GatewayConfig::on_reading` (each new reading, once its name is settled) and `self_source` (who the link events are logged as). 1 new test; C/C++ 109.
 - **Collector:** optional `diagnostics_topic` (`openfleet_collector/diagnostics.py`): OK/WARN/ERROR/STALE → RUNNING/DEGRADED/ERROR/STOPPED, silent 5 s → STOPPED, ≤ 256 names, graph nodes win clashes. 4 new tests (28).

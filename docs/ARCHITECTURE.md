@@ -244,6 +244,8 @@ Replaying a *recording* doesn't run new robot software, so a recorded run always
 | `SESSION_TTL_S` / `SESSION_MAX_S` / `SESSION_REFRESH_S` | 43200 / 604800 / 300 | session idle lifetime, absolute cap after sign-in, and the smallest extension worth a write (#029) |
 | `COOKIE_SECURE` | false | set it behind HTTPS |
 | `LOGIN_HINT` | unset | text on the login page (compose: the demo credentials) |
+| `OIDC_CLIENT_ID` / `OIDC_CLIENT_SECRET` / `OIDC_REDIRECT_URL` | unset | sign in with Google, on when all three are set (#038) |
+| `OIDC_ISSUER` / `OIDC_ALLOWED_DOMAINS` / `OIDC_DEFAULT_ROLE` | Google / `[]` / VIEWER | the provider; verified-email domains that get an account on first sign-in, and its role |
 | `WS_REAUTH_INTERVAL_S` | 30 | how often an open WebSocket re-checks its session/token |
 | `LOGIN_WINDOW_S` / `LOGIN_MAX_FAILURES_PER_USER` / `LOGIN_MAX_FAILURES_PER_IP` | 300 / 5 / 20 | login throttling (#027): failed attempts per window before a 429; 0 disables a scope |
 | `FORWARDED_ALLOW_IPS` (uvicorn, no prefix) | 127.0.0.1 (compose: `*`) | proxies whose `X-Forwarded-For` sets the client IP for the per-IP limit |
@@ -252,6 +254,7 @@ Replaying a *recording* doesn't run new robot software, so a recorded run always
 - **Robots** (DECISIONS #021) use per-robot API keys (`robot_api_keys`) on the writes.
 - **Users** (DECISIONS #022) use `users` and `user_tokens`:
   - the dashboard's HttpOnly session cookie, or an API token as `Authorization: Bearer`;
+  - a session comes from a password, or from Google/OIDC (#038): authorization code + PKCE run by the backend, the ID token verified against the provider's keys, then the same session cookie (`app/core/oidc.py`);
   - sessions slide: each request extends them up to `SESSION_TTL_S` idle, never past `SESSION_MAX_S` after sign-in (#029); API tokens don't;
   - required on every read and WebSocket;
   - roles VIEWER < OPERATOR, where triage needs OPERATOR.

@@ -37,12 +37,13 @@ def _read_password(args: argparse.Namespace) -> str:
 
 
 def cmd_create(args: argparse.Namespace) -> int:
-    password = _read_password(args)
+    password = None if args.sso else _read_password(args)
     user = run_db(
         args.database_url,
         lambda s: UserService(s).create(args.username, password, _role(args.role)),
     )
-    print(f"created user {user.username!r} ({user.role.lower()})")
+    how = ", signs in with SSO only" if args.sso else ""
+    print(f"created user {user.username!r} ({user.role.lower()}{how})")
     return 0
 
 
@@ -169,6 +170,11 @@ def add_parser(sub: Any, default_database_url: str) -> argparse.ArgumentParser:
     c = usub.add_parser("create", help="create a user")
     c.add_argument("username")
     c.add_argument("--role", choices=ROLES, default="viewer")
+    c.add_argument(
+        "--sso",
+        action="store_true",
+        help="no password: the user signs in with Google/OIDC (username = their email)",
+    )
     with_password(c)
     c.set_defaults(users_func=cmd_create)
 

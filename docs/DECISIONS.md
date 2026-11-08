@@ -725,7 +725,7 @@ Both showed up in the first end-to-end demo.
 - Building the agent inside the guest: needs a compiler in the image and minutes of TCG compile time.
 - Raising the exposure threshold to 3.4: the score pointed at real, cheap hardening.
 **Tradeoffs:**
-- Not yet run on GitHub's x86_64 runners; the first nightly is the real TCG timing.
+- On GitHub's x86_64 runners it needed two fixes: no iPXE option ROM (`romfile=`), and `-cpu neoverse-n1` instead of `max`, under which Ubuntu 26.04's edk2 hangs after its banner. Passing since 021fc15: boot to first run 74 s, reboot to new run 56 s (TCG).
 - The EPERM check reads the agent's journal; a syscall that failed silently without logging wouldn't show. The full lifecycle passing is the stronger evidence.
 - The guest is a QEMU `virt` machine, not robot hardware; timings describe that machine.
 **Date:** 2026-11-08
@@ -758,4 +758,34 @@ Both showed up in the first end-to-end demo.
 - Expected rates live in the collector config, not taken from DESCRIBE (the agent path gets them automatically). The bridge could publish them as diagnostic key-values later.
 - A reading is published on the device thread under the gateway's lock; publishing is quick, but a very slow DDS layer would delay frame handling.
 - Readings carry no timestamp (`Int32` has no header); fine for rates, not for fusing data.
+**Date:** 2026-11-08
+
+## 038 — Sign in with Google: OIDC authorization code + PKCE, run by the backend; invite or allowed domain
+**Status:** Accepted (2026-11-08). The owner chose Google.
+**Decision:**
+- **Flow** (`app/core/oidc.py`, `GET /auth/oidc/login` and `/auth/oidc/callback`): the backend is a confidential client. Login creates state, nonce and a PKCE verifier, keeps them in a 10-minute HttpOnly `SameSite=Lax` cookie scoped to `/api/v1/auth/oidc`, and redirects to the provider. The callback requires the state to match that cookie, exchanges the code (client secret + verifier), and verifies the ID token: signature against the provider's JWKS (cached an hour, refetched once for an unknown key id; `none`/HMAC refused), `iss`, `aud`, `exp`/`iat` (60 s leeway), `sub`, and the nonce. On success it sets the same session cookie as a password login (#022, #029) and redirects to `/`; on failure, to `/login?error=…`, which the login page shows.
+- **Who gets in** (`UserService.login_oidc`):
+  1. the account already linked to this identity (`users.oidc_subject` = `issuer|sub`, migration 0009);
+  2. else an account whose username is the **verified** email: an invite (`openfleet users create EMAIL --sso`, no password), linked on first sign-in and never re-linked to another identity;
+  3. else a new account if the email's domain is in `OIDC_ALLOWED_DOMAINS`, with `OIDC_DEFAULT_ROLE` (VIEWER);
+  4. else refused. Disabled accounts are refused.
+- **Settings:** `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET`, `OIDC_REDIRECT_URL` (all three turn it on), `OIDC_ISSUER` (Google by default; any OIDC issuer), `OIDC_ALLOWED_DOMAINS`, `OIDC_DEFAULT_ROLE`, `OIDC_PROVIDER_NAME`. `/auth/config` tells the login page to show the button.
+- SSO-only accounts store `!` as the password hash, which `verify_password` can never match.
+**Why:**
+- **Backend-run code flow + PKCE** keeps tokens out of the browser (no implicit flow, no tokens in JS) and ends in the session model everything else already uses: roles, sliding expiry, logout, WebSocket re-checks and the audit log work unchanged.
+- **The flow cookie instead of server-side state**: nothing to store or expire in Postgres/Redis, works across replicas, and its contents are only useful to the browser that holds it.
+- **Explicit access** (invite or allowed domain): "anyone with a Google account" would make every Gmail user a viewer of the fleet.
+- **The verified email as the username** reuses the existing username rule (it already allows `@`), so invites are ordinary users; the provider subject then pins the account so a changed or recycled email can't take it over.
+- **PyJWT** for JWS verification instead of hand-rolled crypto.
+**Verified:**
+- `tests/test_oidc.py` (16, against a fake provider over `httpx.MockTransport` that signs real RS256 tokens and checks PKCE): button only when configured; redirect with state/nonce/S256; allowed domain → viewer, same identity reused; invite linked, then a second identity for that email refused; unknown domain, unverified or missing email refused; disabled refused; forged signature, wrong aud/iss, expired, wrong nonce refused; forged or missing state refused; cancel at the provider; an SSO-only account can't use a password. Backend 269 pass.
+- Live through nginx with a placeholder client id: `/auth/config` advertises Google, `/auth/oidc/login` fetched Google's real discovery and redirected to `accounts.google.com/o/oauth2/v2/auth` with the parameters above and the flow cookie; the login page shows the button and a refused sign-in's message (headless Chrome).
+**Alternatives considered:**
+- A library such as Authlib: more surface than the ~200 lines this needs, and the verification is still PyJWT-level.
+- SPA-side OIDC (tokens in the browser): a second auth model next to the session cookie, and tokens exposed to JS.
+- Auto-creating any verified Google account: see "explicit access".
+**Tradeoffs:**
+- Not exercised against Google with a real client: that needs the owner's OAuth client. The protocol path up to Google's login page is verified live; the rest against the fake provider.
+- Group/role claims are not mapped; roles are managed in OpenFleet (`openfleet users set-role`).
+- One provider at a time.
 **Date:** 2026-11-08

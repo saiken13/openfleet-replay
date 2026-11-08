@@ -17,6 +17,12 @@ x-backend: &backend
     OPENFLEET_ROBOT_KEYS_FILE: /etc/openfleet/demo-robot-keys.json
     OPENFLEET_USERS_FILE: /etc/openfleet/demo-users.json
     OPENFLEET_LOGIN_HINT: "Demo: operator / operator-demo (can triage) or viewer / viewer-demo"
+    # Sign in with Google (DECISIONS #038): set these in .env (see .env.example); unset, the
+    # login page simply has no Google button.
+    OPENFLEET_OIDC_CLIENT_ID: ${OPENFLEET_OIDC_CLIENT_ID:-}
+    OPENFLEET_OIDC_CLIENT_SECRET: ${OPENFLEET_OIDC_CLIENT_SECRET:-}
+    OPENFLEET_OIDC_REDIRECT_URL: ${OPENFLEET_OIDC_REDIRECT_URL:-http://localhost:8080/api/v1/auth/oidc/callback}
+    OPENFLEET_OIDC_ALLOWED_DOMAINS: ${OPENFLEET_OIDC_ALLOWED_DOMAINS:-[]}
     # uvicorn takes the client IP (for login throttling, DECISIONS #027) from X-Forwarded-For
     # sent by these addresses. "*" because the nginx containers' IPs aren't fixed; the proxies
     # overwrite the header, so it can't be spoofed through them. It CAN be spoofed by calling

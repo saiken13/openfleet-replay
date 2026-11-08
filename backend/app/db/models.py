@@ -252,6 +252,9 @@ class User(Base):
     role: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(TZ, server_default=func.now())
     disabled_at: Mapped[datetime | None] = mapped_column(TZ)
+    # Sign-in provider identity, "<issuer>|<sub>" (DECISIONS #038). Set on the first OIDC
+    # sign-in; the account then only ever matches that identity.
+    oidc_subject: Mapped[str | None] = mapped_column(Text, unique=True)
 
 
 class UserToken(Base):

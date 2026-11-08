@@ -60,7 +60,8 @@ function qs(params: Record<string, string | number | undefined | null>): string 
 
 export const api = {
   auth: {
-    config: () => request<{ login_hint: string | null }>("/auth/config"),
+    config: () =>
+      request<{ login_hint: string | null; oidc: { name: string; login_url: string } | null }>("/auth/config"),
     me: () => request<User>("/auth/me"),
     login: (username: string, password: string) =>
       request<User>("/auth/login", { method: "POST", body: JSON.stringify({ username, password }) }),

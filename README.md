@@ -70,7 +70,7 @@ To run two backend replicas behind a round-robin nginx: `docker compose --profil
 
 There are two kinds of credentials:
 - **Robots** use a per-robot API key on their writes (register, heartbeat, runs, telemetry). A key only works for its own robot.
-- **People** sign in to the dashboard. Every read and live view needs a user. Roles:
+- **People** sign in to the dashboard with a password or **with Google** (OpenID Connect). Every read and live view needs a user. Roles:
   - **viewer:** reads everything.
   - **operator:** can also triage incidents. Every triage action is recorded with who did it, on the **Audit** page.
 - **CLI and CI** (`openfleet check`) use a user API token.
@@ -88,6 +88,7 @@ docker compose exec backend openfleet retention --days 30 --dry-run   # what dat
 
 - **Data retention:** off by default. Set `OPENFLEET_RETENTION_DAYS=30` and the backend compacts finished runs older than that: their summary is frozen (so `openfleet check` against an old baseline still works), and the per-second telemetry and log lines are deleted. Incidents and the triage audit are kept. See DECISIONS #030.
 - **Rotating a robot key:** create a new one, deploy it, then revoke the old one. A robot can hold several active keys.
+- **Sign in with Google:** create an OAuth client (Google Cloud console → Credentials → OAuth client ID, *Web application*, redirect URI `http://localhost:8080/api/v1/auth/oidc/callback`) and set `OPENFLEET_OIDC_CLIENT_ID` / `_CLIENT_SECRET` in `.env` (see `.env.example`). Anyone with a verified email in `OPENFLEET_OIDC_ALLOWED_DOMAINS` gets a viewer account on first sign-in; invite anyone else with `openfleet users create alice@example.com --sso [--role operator]`. Everyone else is refused. Any OIDC issuer works (`OPENFLEET_OIDC_ISSUER`). See DECISIONS #038.
 - **Sessions:** HttpOnly SameSite=Strict cookies. A session ends after 12 h without use, and always 7 days after sign-in (`OPENFLEET_SESSION_TTL_S` / `OPENFLEET_SESSION_MAX_S`).
 - **Login throttling:** 5 failed sign-ins per username, or 20 per client IP, in 5 minutes gets a 429 with `Retry-After`. Tune it with `OPENFLEET_LOGIN_*`. Counters are shared across replicas through Redis.
 - **Production:** behind HTTPS, set `OPENFLEET_COOKIE_SECURE=true`. Drop the demo `*_FILE` and `LOGIN_HINT` settings. Don't expose the backend port directly, and set `FORWARDED_ALLOW_IPS` to your proxy's address. The proxy must overwrite `X-Forwarded-For` (see `frontend/nginx.conf`).

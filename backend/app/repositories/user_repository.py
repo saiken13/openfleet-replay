@@ -29,6 +29,9 @@ class UserRepository:
         )
         return (await self.session.scalars(stmt)).one_or_none()
 
+    async def by_oidc_subject(self, subject: str) -> User | None:
+        return await self.session.scalar(select(User).where(User.oidc_subject == subject))
+
     async def list_users(self) -> list[User]:
         return list(await self.session.scalars(select(User).order_by(User.username)))
 

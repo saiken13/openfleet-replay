@@ -62,6 +62,8 @@ PUBLIC = {
     ("GET", "/api/v1/auth/config"),
     ("POST", "/api/v1/auth/login"),
     ("POST", "/api/v1/auth/logout"),  # needs no auth: it ends whatever session it is given
+    ("GET", "/api/v1/auth/oidc/login"),  # the sign-in itself (DECISIONS #038)
+    ("GET", "/api/v1/auth/oidc/callback"),
 }
 
 
@@ -114,7 +116,10 @@ async def test_reads_require_a_user(client: httpx.AsyncClient, path: str) -> Non
 
 async def test_public_endpoints(client: httpx.AsyncClient) -> None:
     assert (await client.get("/api/v1/health", auth=None)).status_code == 200
-    assert (await client.get("/api/v1/auth/config", auth=None)).json() == {"login_hint": None}
+    assert (await client.get("/api/v1/auth/config", auth=None)).json() == {
+        "login_hint": None,
+        "oidc": None,
+    }
 
 
 # --- login, sessions, logout ------------------------------------------------------------

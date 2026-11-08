@@ -31,6 +31,17 @@ class Settings(BaseSettings):
     session_refresh_s: float = Field(300.0, ge=0)
     cookie_secure: bool = False  # set true behind HTTPS
     login_hint: str | None = None  # shown on the login page (e.g. demo credentials)
+    # Sign in with Google (or any OpenID Connect issuer; DECISIONS #038). On when client id,
+    # secret and redirect URL are all set. Who may sign in: an existing user whose username
+    # is the verified email, or anyone with a verified email in OIDC_ALLOWED_DOMAINS (created
+    # with OIDC_DEFAULT_ROLE). Everyone else is refused.
+    oidc_issuer: str = "https://accounts.google.com"
+    oidc_client_id: str | None = None
+    oidc_client_secret: str | None = None
+    oidc_redirect_url: str | None = None  # https://HOST/api/v1/auth/oidc/callback
+    oidc_allowed_domains: list[str] = []
+    oidc_default_role: str = "VIEWER"
+    oidc_provider_name: str = "Google"  # the login button's label
     ws_reauth_interval_s: float = Field(30.0, gt=0)  # live sockets re-check their session
     # Login throttling (DECISIONS #027): attempts per fixed window, per username and per
     # client IP. A successful login doesn't count. 0 disables that scope.
@@ -78,7 +89,16 @@ class Settings(BaseSettings):
     def _session_bounds(self) -> "Settings":
         if self.session_max_s < self.session_ttl_s:
             raise ValueError("session_max_s must be at least session_ttl_s")
+        if self.oidc_default_role.upper() not in ("VIEWER", "OPERATOR"):
+            raise ValueError("oidc_default_role must be VIEWER or OPERATOR")
+        self.oidc_allowed_domains = [
+            d.strip().lower().lstrip("@") for d in self.oidc_allowed_domains
+        ]
         return self
+
+    @property
+    def oidc_enabled(self) -> bool:
+        return bool(self.oidc_client_id and self.oidc_client_secret and self.oidc_redirect_url)
 
 
 @lru_cache

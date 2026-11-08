@@ -103,18 +103,18 @@ These are end-to-end latencies for this stack: they include the agent's 1 s samp
 
 ## Full system: the agent under systemd (`edge/qemu/qemu_e2e.py`, DECISIONS #036)
 
-Measured on the dev Mac (arm64), wall clock:
+Wall clock, per environment:
 
-| | HVF-accelerated | emulated (TCG, arm64 host) |
-|---|---:|---:|
-| boot to the agent's first run | 25.1 s | 67.7 s |
-| SIGKILL to the restarted agent's new run | 6.2 s | 6.2 s |
-| `systemctl stop` (flush, run ABORTED) | 0.1 s | 0.8 s |
-| reboot to the new run | 23.7 s | 52.7 s |
-| memory in the service's cgroup | 5.1 MiB | 5.1 MiB |
-| `systemd-analyze security` exposure | 1.2 | 1.2 |
+| | HVF-accelerated (dev Mac) | emulated, TCG (dev Mac, arm64) | emulated, TCG (GitHub x86_64 runner) |
+|---|---:|---:|---:|
+| boot to the agent's first run | 25.1 s | 67.7 s | 74.1 s |
+| SIGKILL to the restarted agent's new run | 6.2 s | 6.2 s | 6.1 s |
+| `systemctl stop` (flush, run ABORTED) | 0.1 s | 0.8 s | 0.8 s |
+| reboot to the new run | 23.7 s | 52.7 s | 55.8 s |
+| memory in the service's cgroup | 5.1 MiB | 5.1 MiB | 5.1 MiB |
+| `systemd-analyze security` exposure | 1.2 | 1.2 | 1.2 |
 
-The restart figure is mostly `RestartSec=5`. CI's x86_64 runners emulate a foreign ISA, so their TCG figures will be slower; compare a nightly only with earlier nightlies.
+The restart figure is mostly `RestartSec=5`. Emulation figures describe QEMU's TCG, not a CPU; compare a nightly only with earlier nightlies.
 
 ## Verified on GitHub
-Both workflows ran on GitHub on 2026-11-08. The first runs failed only on GCC 15 false positives (`ubuntu-latest` ships GCC 15; the dev container GCC 13) and a test that assumed a dev database; both fixed. The `qemu-system` job has not run there yet.
+Both workflows ran on GitHub on 2026-11-08. The first runs failed only on GCC 15 false positives (`ubuntu-latest` ships GCC 15; the dev container GCC 13) and a test that assumed a dev database; both fixed. The `qemu-system` job needed two runner fixes (QEMU's iPXE ROM; Ubuntu's edk2 hanging under `-cpu max`, now `neoverse-n1`) and passes since 021fc15.
