@@ -2,12 +2,21 @@
 
 ## Context
 - **AI assistant/model:** Claude Code, Opus 5.5 (`claude-opus-5-5`)
-- **Date:** 2026-11-07
+- **Date:** 2026-11-08
 - **Branch:** `main` (remote: https://github.com/saiken13/openfleet-replay)
 - **Latest commit:** see `git log -1`
 
 ## Current state
-**Embedded Phase 4 done (2026-11-07, DECISIONS #035; [docs/BENCHMARKS.md](docs/BENCHMARKS.md)): regression tier + benchmarks. Every embedded phase is complete.**
+**Pushed and verified on GitHub (2026-11-08).** Commits f9881da (BUG-006/007), fc3dfd5 (embedded Phases 0–4), 63062cb (CI fixes), 432131c (parallel edge e2e).
+- **CI: all green on GitHub** (63062cb and 432131c), every embedded job included.
+- **Nightly (manual runs):** on fc3dfd5, firmware, scenarios and fuzz passed; bench failed (below), so `report` failed by design. On 63062cb, bench and firmware passed; scenarios and fuzz were still running at handoff. Check: `gh run view 42510262373`.
+- **Runner differences fixed:**
+  - `ubuntu-latest` ships **GCC 15** (dev container: GCC 13). At `-O2 -Werror` it false-positives `-Wuninitialized` in `BoundedQueue::pop_for` (moving `optional<Sample>`) and `-Warray-bounds` on `push_back` after a sized vector in `DeviceSim` (`oversize`). Code restructured, not silenced. Reproduce locally with the `gcc:15` Docker image.
+  - `scripts/multi_replica_e2e.py` assumed amr-02..04 existed; it now registers them (idempotent PUT), so it works on CI's fresh DB.
+- **CI time 13 → 5.5 min:** `edge-agent-e2e` is a 3-script matrix needing only `backend` (it waited for `edge` + `firmware`, then ran ~7.3 min serially). The longest job is now `edge` (~5.5 min).
+- **Next:** nothing planned. Owner's choice from "Recommended next task" (my suggestion: the full-system QEMU + systemd check).
+
+**Earlier: Embedded Phase 4 done (2026-11-07, DECISIONS #035; [docs/BENCHMARKS.md](docs/BENCHMARKS.md)): regression tier + benchmarks. Every embedded phase is complete.**
 - **Scenario runner:** `edge/e2e/run_scenarios.py` runs the YAML files in `edge/e2e/scenarios/`: `device_sensor_stops`, `device_link_reconnect`, `backend_outage`, `agent_footprint` and `firmware_watchdog`.
   - `mark` takes the server clock; `measure` is the effect's server-side timestamp minus the mark, with a `max_s` budget.
   - Each scenario ends its run and gates on `redetect`.
@@ -20,7 +29,7 @@
 - **Nightly:** `.github/workflows/nightly.yml` (03:17 UTC + manual). It runs the benchmarks (native x86_64, aarch64 under qemu-user), the Robot suite, every scenario, and 10 min of fuzzing per target on a cached corpus. Then `scripts/nightly_report.py` writes one report: the job summary plus the `nightly-report` artifact.
   - Benchmarks are compared with the previous nightly (Actions cache) and only flagged, never gated.
 - **BUG-007 fixed (found by `backend_outage`):** a restarted backend opened `heartbeat_missing` on robots that had been buffering through its outage. It would also have aborted their runs after an outage over 60 s. The sweeper now waits until it has listened one `HEARTBEAT_TIMEOUT_S` before marking robots OFFLINE, and one `RUN_ABANDON_AFTER_S` before aborting runs (`Sweeper(listening_since=...)`, set in `main.py`). 2 tests; backend 253 pass.
-- **Verified locally:** all of the above; the C/C++ presets native, asan, tsan and x86_64; `renode_test.py`, `gdb_check.sh`, and the three e2e scripts. **Neither workflow has run on GitHub yet** (nor have Phases 1–3's jobs).
+- **Verified locally:** all of the above; the C/C++ presets native, asan, tsan and x86_64; `renode_test.py`, `gdb_check.sh`, and the three e2e scripts. Since run on GitHub (2026-11-08, above).
 - Not done: the optional full-system QEMU (Debian arm64 + systemd).
 - **Next:** nothing planned. The options below need the owner's decision.
 
@@ -277,7 +286,7 @@ scripts/edge-dev.sh bash -c 'cmake --preset fuzz && cmake --build --preset fuzz'
 7. ~~**Data retention.**~~ Done (#030): compact runs (frozen summary, raw rows deleted) via the sweeper or `openfleet retention`; off by default.
 
 **Embedded expansion** ([docs/EMBEDDED_ROADMAP.md](docs/EMBEDDED_ROADMAP.md)): Phases 0–4 are done. Left over, each needing the owner's go:
-- First: push, and watch `CI` and a manual `Nightly` run on GitHub. None of the Phase 1–4 jobs have run there; expect fixes for runner differences (x86_64, Renode portable, renode-test requirements).
+- ~~Push and watch `CI` and a manual `Nightly` on GitHub.~~ Done 2026-11-08 (see Current state).
 - The optional full-system QEMU (Debian arm64 + the agent as a systemd service).
 - Postponed from the roadmap: ROS 2 integration (the agent republishes MCU data as ROS topics).
 
