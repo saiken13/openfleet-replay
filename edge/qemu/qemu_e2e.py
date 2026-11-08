@@ -288,7 +288,9 @@ class Guest:
             + ["-display", "none", "-serial", "stdio", "-monitor", "none"]
             + ["-drive", f"if=virtio,format=qcow2,file={self.disk}"]
             + ["-netdev", f"user,id=n0,hostfwd=tcp:127.0.0.1:{self.ssh_port}-:22"]
-            + ["-device", "virtio-net-pci,netdev=n0"]
+            # romfile=: no iPXE option ROM (we boot from disk; Debian's qemu needs ipxe-qemu
+            # for it, which --no-install-recommends leaves out).
+            + ["-device", "virtio-net-pci,netdev=n0,romfile="]
             + ["-device", "virtio-rng-pci"]
             + ["-smbios", f"type=1,serial=ds=nocloud;s=http://10.0.2.2:{self.seed.port}/"],
             stdin=subprocess.DEVNULL,
@@ -311,6 +313,9 @@ class Guest:
         return r.stdout.strip()
 
     def ssh_ok(self) -> bool:
+        if not self.alive():  # fail now, not after the whole timeout
+            tail = (self.run_dir / "console.log").read_text(errors="replace")[-2000:]
+            raise Failed(f"QEMU exited (code {self.proc and self.proc.poll()}):\n{tail}")
         return self.ssh("echo up", check=False, timeout=15) == "up"
 
     def alive(self) -> bool:
